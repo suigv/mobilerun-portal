@@ -815,6 +815,39 @@ class ApiHandlerTest {
     }
 
     @Test
+    fun startStream_reusesActiveCaptureWithDeviceRelativeScale() {
+        val stateRepo = mockk<StateRepository>(relaxed = true)
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        val handler = createHandler(stateRepo = stateRepo, ime = null, context = context)
+        val manager = mockk<WebRtcManager>(relaxed = true)
+
+        mockkObject(WebRtcManager.Companion)
+        mockkObject(ReverseConnectionService.Companion)
+        mockkObject(CaptureSizing)
+        every { WebRtcManager.getInstance(context) } returns manager
+        every { ReverseConnectionService.getInstance() } returns null
+        every { CaptureSizing.deriveHighestSupportedCaptureSize(context) } returns Pair(1440, 3200)
+        every { manager.isCaptureActive() } returns true
+        every {
+            manager.startStreamWithExistingCapture(1440, 3200, 30, "session-relative", false, 0.5)
+        } just Runs
+
+        assertEquals(
+            ApiResponse.Success("reusing_capture"),
+            handler.startStream(
+                JSONObject()
+                    .put("sessionId", "session-relative")
+                    .put("outputScale", 0.5),
+            ),
+        )
+
+        verify(exactly = 1) {
+            manager.startStreamWithExistingCapture(1440, 3200, 30, "session-relative", false, 0.5)
+        }
+    }
+
+    @Test
     fun startStream_preservesLegacyOptIntBehaviorWhenEitherDimensionKeyExists() {
         val stateRepo = mockk<StateRepository>(relaxed = true)
         val context = mockk<Context>(relaxed = true)
@@ -1129,6 +1162,67 @@ class ApiHandlerTest {
         }
         verify(exactly = 0) { CaptureSizing.deriveAutoCaptureSize(any()) }
         verify(exactly = 1) { context.startActivity(any()) }
+    }
+
+    @Test
+    fun startStream_relativeProfileUsesGenericDeviceBoundsAndOutputScale() {
+        val stateRepo = mockk<StateRepository>(relaxed = true)
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        val handler = createHandler(stateRepo = stateRepo, ime = null, context = context)
+        val manager = mockk<WebRtcManager>(relaxed = true)
+
+        mockkConstructor(Intent::class)
+        every { anyConstructed<Intent>().setFlags(any()) } returns mockk(relaxed = true)
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<Boolean>()) } returns mockk(relaxed = true)
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<Int>()) } returns mockk(relaxed = true)
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<String>()) } returns mockk(relaxed = true)
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<Double>()) } returns mockk(relaxed = true)
+        mockkObject(WebRtcManager.Companion)
+        mockkObject(ReverseConnectionService.Companion)
+        mockkObject(CaptureSizing)
+        every { WebRtcManager.getInstance(context) } returns manager
+        every { ReverseConnectionService.getInstance() } returns null
+        every { manager.isCaptureActive() } returns false
+        assertEquals(
+            ApiResponse.Success("prompting_user"),
+            handler.startStream(
+                JSONObject()
+                    .put("sessionId", "session-capture-max")
+                    .put("outputScale", 0.5),
+            ),
+        )
+
+        verify(exactly = 1) {
+            anyConstructed<Intent>().putExtra(
+                ScreenCaptureActivity.EXTRA_MAX_WIDTH,
+                CaptureSizing.CAPTURE_WIDTH_MAX,
+            )
+        }
+        verify(exactly = 1) {
+            anyConstructed<Intent>().putExtra(
+                ScreenCaptureActivity.EXTRA_MAX_HEIGHT,
+                CaptureSizing.CAPTURE_HEIGHT_MAX,
+            )
+        }
+        verify(exactly = 1) {
+            anyConstructed<Intent>().putExtra(ScreenCaptureService.EXTRA_OUTPUT_SCALE, 0.5)
+        }
+        verify(exactly = 1) { context.startActivity(any()) }
+    }
+
+    @Test
+    fun startStream_rejectsOutputScaleOutsideSupportedRange() {
+        val handler = createHandler(stateRepo = mockk(relaxed = true), ime = null)
+
+        assertEquals(
+            ApiResponse.Error("outputScale must be between 0.5 and 1.0"),
+            handler.startStream(
+                JSONObject()
+                    .put("sessionId", "session-invalid-scale")
+                    .put("outputScale", 2.0),
+            ),
+        )
     }
 
     @Test

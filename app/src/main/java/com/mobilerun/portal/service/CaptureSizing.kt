@@ -82,6 +82,17 @@ internal object CaptureSizing {
     ): Pair<Int, Int> =
         fitCaptureSizeToScreen(screenWidth, screenHeight) ?: legacyCaptureSize
 
+    fun deriveHighestSupportedCaptureSize(
+        screenWidth: Int,
+        screenHeight: Int,
+    ): Pair<Int, Int> =
+        fitCaptureSizeToScreen(
+            screenWidth,
+            screenHeight,
+            CAPTURE_WIDTH_MAX,
+            CAPTURE_HEIGHT_MAX,
+        ) ?: legacyCaptureSize
+
     /**
      * Resolves the current screen size, falling back atomically to the legacy
      * capture size if display lookup or aspect fitting fails.
@@ -89,6 +100,11 @@ internal object CaptureSizing {
     fun deriveAutoCaptureSize(context: Context): Pair<Int, Int> {
         val screenSize = readDisplaySize(context) ?: return legacyCaptureSize
         return deriveAutoCaptureSize(screenSize.first, screenSize.second)
+    }
+
+    fun deriveHighestSupportedCaptureSize(context: Context): Pair<Int, Int> {
+        val screenSize = readDisplaySize(context) ?: return legacyCaptureSize
+        return deriveHighestSupportedCaptureSize(screenSize.first, screenSize.second)
     }
 
     /**

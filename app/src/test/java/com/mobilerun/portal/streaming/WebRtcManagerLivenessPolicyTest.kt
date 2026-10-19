@@ -10,6 +10,25 @@ import org.webrtc.PeerConnection
 
 class WebRtcManagerLivenessPolicyTest {
     @Test
+    fun senderScaleResolutionDownByUsesRelativeScaleForDifferentDevices() {
+        assertEquals(
+            2.0,
+            WebRtcManager.senderScaleResolutionDownBy(1440, 3200, 0.5),
+            0.0001,
+        )
+        assertEquals(
+            1.0,
+            WebRtcManager.senderScaleResolutionDownBy(1242, 2688, 1.0),
+            0.0,
+        )
+        assertEquals(
+            1.0,
+            WebRtcManager.senderScaleResolutionDownBy(720, 1600, 1.0),
+            0.0,
+        )
+    }
+
+    @Test
     fun isPeerHealthyForLiveness_acceptsConnectedIce() {
         assertTrue(
             WebRtcManager.isPeerHealthyForLiveness(

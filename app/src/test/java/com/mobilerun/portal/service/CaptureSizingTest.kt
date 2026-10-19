@@ -42,6 +42,25 @@ class CaptureSizingTest {
     }
 
     @Test
+    fun deriveHighestSupportedCaptureSizeUsesEachDevicesDisplayBounds() {
+        val cases =
+            listOf(
+                SizingCase("Xiaomi QHD+", 1440, 3200, 1440 to 3200),
+                SizingCase("compact portrait", 720, 1600, 720 to 1600),
+                SizingCase("wide landscape", 2340, 1080, 1920 to 886),
+                SizingCase("legacy supported size", 1080, 2400, 1080 to 2400),
+            )
+
+        cases.forEach { case ->
+            assertEquals(
+                case.name,
+                case.expected,
+                CaptureSizing.deriveHighestSupportedCaptureSize(case.screenWidth, case.screenHeight),
+            )
+        }
+    }
+
+    @Test
     fun deriveAutoCaptureSize_doesNotUpscaleAndFloorsToEven() {
         assertEquals(
             700 to 1000,
