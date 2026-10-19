@@ -33,6 +33,7 @@ class ScreenCaptureService : Service() {
 
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
+        const val EXTRA_OUTPUT_SCALE = "output_scale"
         const val EXTRA_FPS = "fps"
         const val EXTRA_WAIT_FOR_OFFER = "wait_for_offer"
 
@@ -76,6 +77,7 @@ class ScreenCaptureService : Service() {
                 val captureMode = intent.getStringExtra(EXTRA_CAPTURE_MODE) ?: CAPTURE_MODE_STREAM
                 val width = intent.getIntExtra(EXTRA_WIDTH, 720)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, 1280)
+                val outputScale = intent.getDoubleExtra(EXTRA_OUTPUT_SCALE, 1.0)
                 val fps = intent.getIntExtra(EXTRA_FPS, 30)
                 val waitForOffer = intent.getBooleanExtra(EXTRA_WAIT_FOR_OFFER, false)
 
@@ -138,7 +140,8 @@ class ScreenCaptureService : Service() {
                             height = height,
                             fps = fps,
                             sessionId = streamRequestId,
-                            waitForOffer = waitForOffer
+                            waitForOffer = waitForOffer,
+                            outputScale = outputScale,
                         )
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to start stream", e)

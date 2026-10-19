@@ -113,9 +113,11 @@ class ApiHandler(
         val auto: Boolean,
         val maxWidth: Int? = null,
         val maxHeight: Int? = null,
+        val outputScale: Double? = null,
     ) {
         fun resolve(context: Context): Pair<Int, Int> =
             when {
+                outputScale != null -> CaptureSizing.deriveHighestSupportedCaptureSize(context)
                 maxWidth != null && maxHeight != null ->
                     CaptureSizing.deriveCapCaptureSize(context, maxWidth, maxHeight)
                 auto -> CaptureSizing.deriveAutoCaptureSize(context)
@@ -130,6 +132,19 @@ class ApiHandler(
      * and falls through to the legacy explicit/auto behavior.
      */
     private fun selectCaptureSize(params: JSONObject): CaptureSizeSelection {
+        if (params.has("outputScale")) {
+            val outputScale = params.optDouble("outputScale", Double.NaN)
+            if (!outputScale.isFinite() || outputScale !in 0.5..1.0) {
+                throw IllegalArgumentException("outputScale must be between 0.5 and 1.0")
+            }
+            return CaptureSizeSelection(
+                width = CaptureSizing.DEFAULT_CAPTURE_WIDTH,
+                height = CaptureSizing.DEFAULT_CAPTURE_HEIGHT,
+                auto = false,
+                outputScale = outputScale,
+            )
+        }
+
         val maxWidth = params.optInt("maxWidth", 0)
         val maxHeight = params.optInt("maxHeight", 0)
         if (maxWidth > 0 && maxHeight > 0) {
@@ -2017,7 +2032,12 @@ class ApiHandler(
     }
 
     fun startStream(params: JSONObject): ApiResponse {
-        val captureSize = selectCaptureSize(params)
+        val captureSize =
+            try {
+                selectCaptureSize(params)
+            } catch (e: IllegalArgumentException) {
+                return ApiResponse.Error(e.message ?: "invalid capture profile")
+            }
         val fps = params.optInt("fps", 30).coerceIn(1, 60)
         val sessionId = params.optString("sessionId").trim()
         if (sessionId.isEmpty()) {
@@ -2040,6 +2060,7 @@ class ApiHandler(
                     fps = fps,
                     sessionId = sessionId,
                     waitForOffer = waitForOffer,
+                    outputScale = captureSize.outputScale,
                 )
                 ApiResponse.Success("reusing_capture")
             } catch (e: Exception) {
@@ -2053,14 +2074,23 @@ class ApiHandler(
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(ScreenCaptureActivity.EXTRA_MODE, ScreenCaptureActivity.MODE_STREAM)
                 putExtra(ScreenCaptureActivity.EXTRA_AUTO_CAPTURE_SIZE, captureSize.auto)
-                captureSize.maxWidth?.let {
+                val maxWidth =
+                    captureSize.maxWidth
+                        ?: if (captureSize.outputScale != null) CaptureSizing.CAPTURE_WIDTH_MAX else null
+                val maxHeight =
+                    captureSize.maxHeight
+                        ?: if (captureSize.outputScale != null) CaptureSizing.CAPTURE_HEIGHT_MAX else null
+                maxWidth?.let {
                     putExtra(ScreenCaptureActivity.EXTRA_MAX_WIDTH, it)
                 }
-                captureSize.maxHeight?.let {
+                maxHeight?.let {
                     putExtra(ScreenCaptureActivity.EXTRA_MAX_HEIGHT, it)
                 }
                 putExtra(ScreenCaptureService.EXTRA_WIDTH, captureSize.width)
                 putExtra(ScreenCaptureService.EXTRA_HEIGHT, captureSize.height)
+                captureSize.outputScale?.let {
+                    putExtra(ScreenCaptureService.EXTRA_OUTPUT_SCALE, it)
+                }
                 putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                 putExtra(ScreenCaptureService.EXTRA_WAIT_FOR_OFFER, waitForOffer)
             }
@@ -2156,7 +2186,12 @@ class ApiHandler(
         if (sessionId.isEmpty()) {
             return ApiResponse.Error("Missing required param: 'sessionId'")
         }
-        val captureSize = selectCaptureSize(params)
+        val captureSize =
+            try {
+                selectCaptureSize(params)
+            } catch (e: IllegalArgumentException) {
+                return ApiResponse.Error(e.message ?: "invalid capture profile")
+            }
         val fps = params.optInt("fps", 30).coerceIn(1, 60)
 
         val manager = WebRtcManager.getInstance(context)
@@ -2180,6 +2215,7 @@ class ApiHandler(
                     fps = fps,
                     sessionId = sessionId,
                     waitForOffer = true,
+                    outputScale = captureSize.outputScale,
                 )
                 ApiResponse.Success("reusing_capture")
             } else {
