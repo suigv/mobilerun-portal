@@ -610,9 +610,9 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
     private fun setupResetButton() {
         binding.btnResetSettings.setOnClickListener {
             AlertDialog.Builder(this)
-                .setTitle("Reset to Defaults")
-                .setMessage("This will reset all settings to their default values and disconnect any active connections. Continue?")
-                .setPositiveButton("Reset") { _, _ ->
+                .setTitle(R.string.portal_ui_reset_to_defaults)
+                .setMessage(R.string.portal_ui_reset_settings_message)
+                .setPositiveButton(R.string.portal_ui_reset) { _, _ ->
                     val serviceIntent = Intent(this, ReverseConnectionService::class.java).apply {
                         action = ReverseConnectionService.ACTION_DISCONNECT
                     }
@@ -632,7 +632,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                     finish()
                     startActivity(intent)
                 }
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton(R.string.portal_ui_cancel, null)
                 .show()
         }
     }
