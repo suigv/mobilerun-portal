@@ -1,5 +1,6 @@
 package com.mobilerun.portal.api
 
+import com.mobilerun.portal.R
 import android.accessibilityservice.AccessibilityService
 import android.app.ActivityOptions
 import android.app.ActivityManager
@@ -113,9 +114,11 @@ class ApiHandler(
         val auto: Boolean,
         val maxWidth: Int? = null,
         val maxHeight: Int? = null,
+        val outputScale: Double? = null,
     ) {
         fun resolve(context: Context): Pair<Int, Int> =
             when {
+                outputScale != null -> CaptureSizing.deriveHighestSupportedCaptureSize(context)
                 maxWidth != null && maxHeight != null ->
                     CaptureSizing.deriveCapCaptureSize(context, maxWidth, maxHeight)
                 auto -> CaptureSizing.deriveAutoCaptureSize(context)
@@ -130,6 +133,19 @@ class ApiHandler(
      * and falls through to the legacy explicit/auto behavior.
      */
     private fun selectCaptureSize(params: JSONObject): CaptureSizeSelection {
+        if (params.has("outputScale")) {
+            val outputScale = params.optDouble("outputScale", Double.NaN)
+            if (!outputScale.isFinite() || outputScale !in 0.5..1.0) {
+                throw IllegalArgumentException("outputScale must be between 0.5 and 1.0")
+            }
+            return CaptureSizeSelection(
+                width = CaptureSizing.DEFAULT_CAPTURE_WIDTH,
+                height = CaptureSizing.DEFAULT_CAPTURE_HEIGHT,
+                auto = false,
+                outputScale = outputScale,
+            )
+        }
+
         val maxWidth = params.optInt("maxWidth", 0)
         val maxHeight = params.optInt("maxHeight", 0)
         if (maxWidth > 0 && maxHeight > 0) {
@@ -834,9 +850,10 @@ class ApiHandler(
             ForceStopUiResult(attempted = false, success = false, reason = "ui_disabled")
         }
 
-        // UI fallback can be delayed on some devices; don't override a successful
-        // background-process kill with a transient UI readiness failure.
-        val overallSuccess = killSuccess || uiResult.success
+        // A background-process kill is best-effort. Only a confirmed OS force-stop
+        // may be reported as a cold-start-capable stop.
+        val forceStopped = uiResult.success
+        val overallSuccess = forceStopped
         val resultJson = JSONObject().apply {
             put("message", "Stop requested for $packageName")
             put("killBackgroundProcesses", killSuccess)
@@ -844,14 +861,11 @@ class ApiHandler(
             put("uiAttempted", uiResult.attempted)
             put("uiSuccess", uiResult.success)
             put("uiReason", uiResult.reason ?: JSONObject.NULL)
+            put("forceStopped", forceStopped)
             put("overallSuccess", overallSuccess)
         }
 
-        return if (overallSuccess) {
-            ApiResponse.RawObject(resultJson)
-        } else {
-            ApiResponse.Error(resultJson.toString())
-        }
+        return ApiResponse.RawObject(resultJson)
     }
 
     fun getTime(): ApiResponse {
@@ -1036,10 +1050,13 @@ class ApiHandler(
         if (info != null && info.isEnabled) {
             return info.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
-        if (!isEnglishLocale()) return false
         val button = findBestClickableMatch(
             elements,
-            listOf("force stop", "force-stop", "ok", "yes", "confirm"),
+            if (isEnglishLocale()) {
+                listOf("force stop", "force-stop", "ok", "yes", "confirm")
+            } else {
+                listOf("结束运行", "强制停止", "强行停止", "确定", "是")
+            },
         )
         val fallbackInfo = button?.nodeInfo ?: return false
         if (!fallbackInfo.isEnabled) return false
@@ -1167,23 +1184,22 @@ class ApiHandler(
         packageName: String,
     ): Boolean {
         if (isForceStopConfirmDialogVisible(elements)) return true
-        val hasForceStopText = if (isEnglishLocale()) {
-            elements.any { element ->
-                val text = element.text.lowercase()
-                val desc = element.nodeInfo.contentDescription?.toString()?.lowercase().orEmpty()
-                text.contains("force stop") || desc.contains("force stop")
-            }
+        val forceStopTexts = if (isEnglishLocale()) {
+            listOf("force stop", "force-stop")
         } else {
-            false
+            listOf("结束运行", "强制停止", "强行停止")
+        }
+        val hasForceStopText = elements.any { element ->
+            val text = element.text.lowercase()
+            val desc = element.nodeInfo.contentDescription?.toString()?.lowercase().orEmpty()
+            forceStopTexts.any { needle ->
+                text.contains(needle.lowercase()) || desc.contains(needle.lowercase())
+            }
         }
         val labelVisible = isAppLabelVisible(elements, appLabel, packageName)
         val hasForceStopButton = findForceStopButton(elements) != null
         if (!labelVisible) return false
-        return if (isEnglishLocale()) {
-            hasForceStopText && hasForceStopButton
-        } else {
-            hasForceStopButton
-        }
+        return hasForceStopText && hasForceStopButton
     }
 
     private fun isAppLabelVisible(
@@ -1219,19 +1235,27 @@ class ApiHandler(
                 return element
             }
         }
-        if (isEnglishLocale()) {
-            val textMatch = findClickableForText(
-                elements,
-                listOf("force stop", "force-stop"),
-            )
-            if (textMatch != null) return textMatch
-        }
+        val textMatch = findClickableForText(
+            elements,
+            if (isEnglishLocale()) {
+                listOf("force stop", "force-stop")
+            } else {
+                listOf("结束运行", "强制停止", "强行停止", "停止")
+            },
+        )
+        if (textMatch != null) return textMatch
         val settingsButton = findSettingsActionButton(elements)
         if (settingsButton != null) return settingsButton
         val actionRowButton = findActionRowForceStopFallback(elements)
         if (actionRowButton != null) return actionRowButton
-        if (!isEnglishLocale()) return null
-        return findBestClickableMatch(elements, listOf("force stop", "force-stop"))
+        return findBestClickableMatch(
+            elements,
+            if (isEnglishLocale()) {
+                listOf("force stop", "force-stop")
+            } else {
+                listOf("结束运行", "强制停止", "强行停止")
+            },
+        )
     }
 
     private fun findClickableForText(
@@ -1354,6 +1378,10 @@ class ApiHandler(
                 val text = element.text.lowercase()
                 val desc = info.contentDescription?.toString()?.lowercase().orEmpty()
                 if (text == "open" || desc == "open") return true
+            } else {
+                val text = element.text
+                val desc = info.contentDescription?.toString().orEmpty()
+                if (text == "打开" || desc == "打开") return true
             }
         }
         return false
@@ -1740,7 +1768,7 @@ class ApiHandler(
 
         val notification = NotificationCompat.Builder(context, INSTALL_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(icon)
-            .setContentTitle("App install")
+            .setContentTitle(context.getString(R.string.portal_ui_app_install_title))
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setAutoCancel(true)
@@ -2017,7 +2045,12 @@ class ApiHandler(
     }
 
     fun startStream(params: JSONObject): ApiResponse {
-        val captureSize = selectCaptureSize(params)
+        val captureSize =
+            try {
+                selectCaptureSize(params)
+            } catch (e: IllegalArgumentException) {
+                return ApiResponse.Error(e.message ?: "invalid capture profile")
+            }
         val fps = params.optInt("fps", 30).coerceIn(1, 60)
         val sessionId = params.optString("sessionId").trim()
         if (sessionId.isEmpty()) {
@@ -2040,6 +2073,7 @@ class ApiHandler(
                     fps = fps,
                     sessionId = sessionId,
                     waitForOffer = waitForOffer,
+                    outputScale = captureSize.outputScale,
                 )
                 ApiResponse.Success("reusing_capture")
             } catch (e: Exception) {
@@ -2053,14 +2087,23 @@ class ApiHandler(
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(ScreenCaptureActivity.EXTRA_MODE, ScreenCaptureActivity.MODE_STREAM)
                 putExtra(ScreenCaptureActivity.EXTRA_AUTO_CAPTURE_SIZE, captureSize.auto)
-                captureSize.maxWidth?.let {
+                val maxWidth =
+                    captureSize.maxWidth
+                        ?: if (captureSize.outputScale != null) CaptureSizing.CAPTURE_WIDTH_MAX else null
+                val maxHeight =
+                    captureSize.maxHeight
+                        ?: if (captureSize.outputScale != null) CaptureSizing.CAPTURE_HEIGHT_MAX else null
+                maxWidth?.let {
                     putExtra(ScreenCaptureActivity.EXTRA_MAX_WIDTH, it)
                 }
-                captureSize.maxHeight?.let {
+                maxHeight?.let {
                     putExtra(ScreenCaptureActivity.EXTRA_MAX_HEIGHT, it)
                 }
                 putExtra(ScreenCaptureService.EXTRA_WIDTH, captureSize.width)
                 putExtra(ScreenCaptureService.EXTRA_HEIGHT, captureSize.height)
+                captureSize.outputScale?.let {
+                    putExtra(ScreenCaptureService.EXTRA_OUTPUT_SCALE, it)
+                }
                 putExtra(ScreenCaptureService.EXTRA_FPS, fps)
                 putExtra(ScreenCaptureService.EXTRA_WAIT_FOR_OFFER, waitForOffer)
             }
@@ -2120,8 +2163,8 @@ class ApiHandler(
 
             val notification = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.ic_menu_camera)
-                .setContentTitle("Start Screen Streaming")
-                .setContentText("Tap to allow cloud screen sharing")
+                .setContentTitle(context.getString(R.string.portal_ui_start_screen_streaming))
+                .setContentText(context.getString(R.string.portal_ui_tap_allow_screen_share))
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -2156,7 +2199,12 @@ class ApiHandler(
         if (sessionId.isEmpty()) {
             return ApiResponse.Error("Missing required param: 'sessionId'")
         }
-        val captureSize = selectCaptureSize(params)
+        val captureSize =
+            try {
+                selectCaptureSize(params)
+            } catch (e: IllegalArgumentException) {
+                return ApiResponse.Error(e.message ?: "invalid capture profile")
+            }
         val fps = params.optInt("fps", 30).coerceIn(1, 60)
 
         val manager = WebRtcManager.getInstance(context)
@@ -2180,6 +2228,7 @@ class ApiHandler(
                     fps = fps,
                     sessionId = sessionId,
                     waitForOffer = true,
+                    outputScale = captureSize.outputScale,
                 )
                 ApiResponse.Success("reusing_capture")
             } else {
