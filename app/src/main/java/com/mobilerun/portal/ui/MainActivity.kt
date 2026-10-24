@@ -293,9 +293,9 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 updateOffsetSlider(newOffset)
                 updateOffsetInputField(newOffset)
 
-                Toast.makeText(this, "Auto-offset reset: $newOffset", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_auto_offset_reset, newOffset), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "Service not available", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_service_not_available), Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -1466,7 +1466,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
 
             if (apiKey.isBlank()) {
                 Log.w(TAG, "showApiKeyDialog: API key is blank")
-                Toast.makeText(this, "Please enter an API key", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_enter_api_key), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
@@ -1481,7 +1481,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             refreshCreditsBalance(force = true)
 
             dialog.dismiss()
-            Toast.makeText(this, "Connecting...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_connecting), Toast.LENGTH_SHORT).show()
         }
 
         dialog.show()
@@ -1536,13 +1536,13 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
 
             if (url.isBlank()) {
                 Log.w(TAG, "showCustomConnectionDialog: URL is blank")
-                Toast.makeText(this, "Please enter a WebSocket URL", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_enter_websocket_url), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
             if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
                 Log.w(TAG, "showCustomConnectionDialog: Invalid URL scheme")
-                Toast.makeText(this, "URL must start with ws:// or wss://", Toast.LENGTH_SHORT)
+                Toast.makeText(this, getString(R.string.portal_ui_url_ws_scheme), Toast.LENGTH_SHORT)
                     .show()
                 return@setOnClickListener
             }
@@ -1563,7 +1563,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             refreshCreditsBalance(force = true)
 
             dialog.dismiss()
-            Toast.makeText(this, "Connecting to custom server...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_connecting_custom_server), Toast.LENGTH_SHORT).show()
         }
 
         dialog.show()
@@ -1670,7 +1670,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = android.content.ClipData.newPlainText("Auth Token", configManager.authToken)
             clipboard.setPrimaryClip(clip)
-            Toast.makeText(this, "Token copied", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_token_copied), Toast.LENGTH_SHORT).show()
         }
 
         binding.deviceIpText.text = getIpAddress() ?: "Unavailable (Check WiFi)"
@@ -1821,7 +1821,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                     isProgrammaticUpdate = true
                     binding.offsetValueDisplay.setText(boundedValue.toString())
                     isProgrammaticUpdate = false
-                    Toast.makeText(this, "Value adjusted to valid range", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.portal_ui_value_adjusted), Toast.LENGTH_SHORT).show()
                 }
 
                 // Update slider to match and apply the offset
@@ -1830,11 +1830,11 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 updateOverlayOffset(boundedValue)
             } else {
                 // Invalid input
-                Toast.makeText(this, "Please enter a valid number", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_enter_valid_number), Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error applying input offset: ${e.message}")
-            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_error_prefix, e.message ?: ""), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1912,14 +1912,14 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                     } else {
                         val error = jsonResponse.getString("error")
                         responseText = "Error: $error"
-                        Toast.makeText(this, "Error: $error", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, getString(R.string.portal_ui_error_prefix, error), Toast.LENGTH_SHORT).show()
                     }
                 }
             }
 
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error fetching combined state data: ${e.message}")
-            Toast.makeText(this, "Error fetching data: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_error_fetching_data, e.message ?: ""), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2057,7 +2057,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             try {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             } catch (_: Exception) {
-                Toast.makeText(this, "Could not open file access settings", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.portal_ui_file_access_settings), Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -2229,16 +2229,16 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             scrollView.addView(textView)
 
             AlertDialog.Builder(this)
-                .setTitle("Response Logs")
+                .setTitle(R.string.portal_ui_response_logs)
                 .setView(scrollView)
-                .setPositiveButton("Close") { dialog, _ ->
+                .setPositiveButton(R.string.portal_ui_close) { dialog, _ ->
                     dialog.dismiss()
                 }
-                .setNeutralButton("Copy") { _, _ ->
+                .setNeutralButton(R.string.portal_ui_copy) { _, _ ->
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     val clip = android.content.ClipData.newPlainText("Response Logs", responseText)
                     clipboard.setPrimaryClip(clip)
-                    Toast.makeText(this, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.portal_ui_logs_copied), Toast.LENGTH_SHORT).show()
                 }
                 .create()
                 .apply {
@@ -2247,7 +2247,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 .show()
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error showing logs dialog: ${e.message}")
-            Toast.makeText(this, "Error showing logs: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_error_showing_logs, e.message ?: ""), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2275,7 +2275,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             startActivity(intent)
         } catch (e: Exception) {
             configManager.clearBrowserAuthPending()
-            Toast.makeText(this, "Could not open browser", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.portal_ui_could_not_open_browser), Toast.LENGTH_SHORT).show()
         }
     }
 
