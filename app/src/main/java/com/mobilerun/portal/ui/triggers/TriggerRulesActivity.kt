@@ -1,5 +1,6 @@
 package com.mobilerun.portal.ui.triggers
 
+import com.mobilerun.portal.R
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
