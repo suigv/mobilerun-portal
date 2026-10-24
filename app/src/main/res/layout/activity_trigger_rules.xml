@@ -30,7 +30,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Create device-local AI triggers for notifications, apps, time, battery, network, SMS, and unlock events."
+                android:text="@string/portal_ui_create_device_local_ai_triggers_for_notifications_apps_time_"
                 android:textColor="@color/text_gray"
                 android:textSize="14sp" />
 
@@ -75,7 +75,7 @@
                             android:gravity="center"
                             android:maxLines="2"
                             android:minLines="2"
-                            android:text="Notification access"
+                            android:text="@string/portal_ui_notification_access_2"
                             android:textAlignment="center"
                             android:textColor="@color/text_white"
                             android:textStyle="bold" />
@@ -121,7 +121,7 @@
                             android:gravity="center"
                             android:maxLines="2"
                             android:minLines="2"
-                            android:text="SMS permission"
+                            android:text="@string/portal_ui_sms_permission"
                             android:textAlignment="center"
                             android:textColor="@color/text_white"
                             android:textStyle="bold" />
@@ -172,7 +172,7 @@
                             android:gravity="center"
                             android:maxLines="2"
                             android:minLines="2"
-                            android:text="Contacts permission"
+                            android:text="@string/portal_ui_contacts_permission"
                             android:textAlignment="center"
                             android:textColor="@color/text_white"
                             android:textStyle="bold" />
@@ -210,7 +210,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Exact alarms"
+                        android:text="@string/portal_ui_exact_alarms"
                         android:textColor="@color/text_white"
                         android:textStyle="bold" />
 
@@ -229,7 +229,7 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="center_horizontal"
                         android:layout_marginTop="12dp"
-                        android:text="Enable exact alarms"
+                        android:text="@string/portal_ui_enable_exact_alarms"
                         android:textAllCaps="false" />
 
                 </LinearLayout>
@@ -241,13 +241,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:text="Add Trigger Rule" />
+                android:text="@string/portal_ui_add_trigger_rule" />
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
-                android:text="Rules"
+                android:text="@string/portal_ui_rules"
                 android:textColor="@color/text_gray"
                 android:textSize="12sp"
                 android:textStyle="bold" />
@@ -257,7 +257,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="No trigger rules configured."
+                android:text="@string/portal_ui_no_trigger_rules_configured"
                 android:textColor="@color/text_gray"
                 android:textSize="14sp" />
 
@@ -288,7 +288,7 @@
                         style="?attr/materialButtonOutlinedStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Recent Runs"
+                        android:text="@string/portal_ui_recent_runs"
                         android:textAllCaps="false" />
 
                     <com.google.android.material.button.MaterialButton
@@ -296,7 +296,7 @@
                         style="?attr/materialButtonOutlinedStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Queued"
+                        android:text="@string/portal_ui_queued"
                         android:textAllCaps="false" />
 
                 </com.google.android.material.button.MaterialButtonToggleGroup>
@@ -307,7 +307,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:minWidth="0dp"
-                    android:text="Clear all"
+                    android:text="@string/portal_ui_clear_all"
                     android:textAllCaps="false"
                     android:visibility="gone" />
 
@@ -318,7 +318,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="No trigger runs yet."
+                android:text="@string/portal_ui_no_trigger_runs_yet"
                 android:textColor="@color/text_gray"
                 android:textSize="14sp" />
 
@@ -327,7 +327,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="No queued tasks."
+                android:text="@string/portal_ui_no_queued_tasks"
                 android:textColor="@color/text_gray"
                 android:textSize="14sp"
                 android:visibility="gone" />
