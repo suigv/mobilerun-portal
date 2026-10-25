@@ -1,5 +1,6 @@
 package com.mobilerun.portal.service
 
+import com.mobilerun.portal.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -69,8 +70,8 @@ class PortalService : Service(), ConfigManager.ConfigChangeListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Portal Active")
-            .setContentText("No-a11y mode")
+            .setContentTitle(getString(R.string.portal_ui_portal_active))
+            .setContentText(getString(R.string.portal_ui_no_a11y_mode))
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)

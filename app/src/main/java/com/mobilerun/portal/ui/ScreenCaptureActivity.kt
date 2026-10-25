@@ -75,6 +75,10 @@ class ScreenCaptureActivity : Activity() {
                     // Forward stream config from launching intent
                     putExtra(ScreenCaptureService.EXTRA_WIDTH, captureWidth)
                     putExtra(ScreenCaptureService.EXTRA_HEIGHT, captureHeight)
+                    putExtra(
+                        ScreenCaptureService.EXTRA_OUTPUT_SCALE,
+                        intent.getDoubleExtra(ScreenCaptureService.EXTRA_OUTPUT_SCALE, 1.0),
+                    )
                     putExtra(ScreenCaptureService.EXTRA_FPS, intent.getIntExtra(ScreenCaptureService.EXTRA_FPS, 30))
                     putExtra(ScreenCaptureService.EXTRA_WAIT_FOR_OFFER, intent.getBooleanExtra(ScreenCaptureService.EXTRA_WAIT_FOR_OFFER, false))
                 }

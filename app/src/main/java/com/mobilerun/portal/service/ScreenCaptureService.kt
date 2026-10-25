@@ -1,5 +1,6 @@
 package com.mobilerun.portal.service
 
+import com.mobilerun.portal.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -33,6 +34,7 @@ class ScreenCaptureService : Service() {
 
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
+        const val EXTRA_OUTPUT_SCALE = "output_scale"
         const val EXTRA_FPS = "fps"
         const val EXTRA_WAIT_FOR_OFFER = "wait_for_offer"
 
@@ -76,6 +78,7 @@ class ScreenCaptureService : Service() {
                 val captureMode = intent.getStringExtra(EXTRA_CAPTURE_MODE) ?: CAPTURE_MODE_STREAM
                 val width = intent.getIntExtra(EXTRA_WIDTH, 720)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, 1280)
+                val outputScale = intent.getDoubleExtra(EXTRA_OUTPUT_SCALE, 1.0)
                 val fps = intent.getIntExtra(EXTRA_FPS, 30)
                 val waitForOffer = intent.getBooleanExtra(EXTRA_WAIT_FOR_OFFER, false)
 
@@ -138,7 +141,8 @@ class ScreenCaptureService : Service() {
                             height = height,
                             fps = fps,
                             sessionId = streamRequestId,
-                            waitForOffer = waitForOffer
+                            waitForOffer = waitForOffer,
+                            outputScale = outputScale,
                         )
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to start stream", e)
@@ -259,12 +263,12 @@ class ScreenCaptureService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Screen Streaming Active")
-            .setContentText("Mobilerun Portal is sharing your screen")
+            .setContentTitle(getString(R.string.portal_ui_screen_streaming_active))
+            .setContentText(getString(R.string.portal_ui_screen_streaming_text))
             .setSmallIcon(android.R.drawable.ic_menu_camera) // Use a better icon if available
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
-                "Stop Streaming",
+                getString(R.string.portal_ui_stop_streaming),
                 stopPendingIntent
             )
             .setPriority(NotificationCompat.PRIORITY_LOW)

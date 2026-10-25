@@ -1,5 +1,6 @@
 package com.mobilerun.portal.streaming
 
+import com.mobilerun.portal.R
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -312,6 +313,15 @@ class WebRtcManager private constructor(private val context: Context) {
         }
 
         internal fun shouldWarnForZeroSentStats(intervalCount: Int): Boolean = intervalCount == 2
+
+        internal fun senderScaleResolutionDownBy(
+            sourceWidth: Int,
+            sourceHeight: Int,
+            outputScale: Double,
+        ): Double {
+            if (sourceWidth <= 0 || sourceHeight <= 0 || !outputScale.isFinite() || outputScale <= 0.0) return 1.0
+            return max(1.0, 1.0 / outputScale)
+        }
 
         internal fun shouldArmCaptureOnlyIdleStop(
             usedSharedCaptureSession: Boolean,
@@ -897,7 +907,8 @@ class WebRtcManager private constructor(private val context: Context) {
         height: Int,
         fps: Int,
         iceServers: List<PeerConnection.IceServer>? = null,
-        waitForOffer: Boolean = false
+        waitForOffer: Boolean = false,
+        outputScale: Double? = null,
     ) {
         val sessionId =
             streamRequestId?.takeIf { it.isNotBlank() }
@@ -910,6 +921,7 @@ class WebRtcManager private constructor(private val context: Context) {
             sessionId = sessionId,
             iceServers = iceServers,
             waitForOffer = waitForOffer,
+            outputScale = outputScale,
         )
     }
 
@@ -920,7 +932,8 @@ class WebRtcManager private constructor(private val context: Context) {
         fps: Int,
         sessionId: String,
         iceServers: List<PeerConnection.IceServer>? = null,
-        waitForOffer: Boolean = false
+        waitForOffer: Boolean = false,
+        outputScale: Double? = null,
     ) {
         require(sessionId.isNotBlank()) { "Missing required param: 'sessionId'" }
         cancelIdleStop()
@@ -950,6 +963,7 @@ class WebRtcManager private constructor(private val context: Context) {
                 fps = fps,
                 customIceServers = effectiveIceServers,
                 waitForOffer = waitForOffer,
+                outputScale = outputScale,
             )
             return
         }
@@ -1014,7 +1028,7 @@ class WebRtcManager private constructor(private val context: Context) {
         try {
             if (isCurrentStream(streamId)) {
                 val sender = connectionForSender?.addTrack(activeTrack, listOf(VIDEO_TRACK_ID))
-                configureVideoSender(sender, width, height, fps)
+                configureVideoSender(sender, width, height, fps, outputScale)
                 synchronized(streamLock) {
                     if (isCurrentStreamLocked(streamId) && peerConnection == connectionForSender) {
                         primaryVideoSender = sender
@@ -1059,7 +1073,8 @@ class WebRtcManager private constructor(private val context: Context) {
         width: Int,
         height: Int,
         fps: Int,
-        waitForOffer: Boolean = false
+        waitForOffer: Boolean = false,
+        outputScale: Double? = null,
     ) {
         val sessionId =
             streamRequestId?.takeIf { it.isNotBlank() }
@@ -1070,6 +1085,7 @@ class WebRtcManager private constructor(private val context: Context) {
             fps = fps,
             sessionId = sessionId,
             waitForOffer = waitForOffer,
+            outputScale = outputScale,
         )
     }
 
@@ -1078,7 +1094,8 @@ class WebRtcManager private constructor(private val context: Context) {
         height: Int,
         fps: Int,
         sessionId: String,
-        waitForOffer: Boolean = false
+        waitForOffer: Boolean = false,
+        outputScale: Double? = null,
     ) {
         require(sessionId.isNotBlank()) { "Missing required param: 'sessionId'" }
         cancelIdleStop()
@@ -1104,6 +1121,7 @@ class WebRtcManager private constructor(private val context: Context) {
                 fps = fps,
                 customIceServers = effectiveIceServers,
                 waitForOffer = waitForOffer,
+                outputScale = outputScale,
             )
             return
         }
@@ -1123,7 +1141,6 @@ class WebRtcManager private constructor(private val context: Context) {
                 }
             }
         cleanupPeerResources(stalePeer)
-        updateCaptureFormat(width, height, fps)
         synchronized(streamLock) {
             primarySessionId = sessionId
             streamRequestId = sessionId
@@ -1173,7 +1190,7 @@ class WebRtcManager private constructor(private val context: Context) {
         try {
             if (isCurrentStream(streamId)) {
                 val sender = connectionForSender?.addTrack(activeTrack, listOf(VIDEO_TRACK_ID))
-                configureVideoSender(sender, width, height, fps)
+                configureVideoSender(sender, width, height, fps, outputScale)
                 synchronized(streamLock) {
                     if (isCurrentStreamLocked(streamId) && peerConnection == connectionForSender) {
                         primaryVideoSender = sender
@@ -1199,6 +1216,7 @@ class WebRtcManager private constructor(private val context: Context) {
         fps: Int,
         customIceServers: List<PeerConnection.IceServer>?,
         waitForOffer: Boolean,
+        outputScale: Double? = null,
     ) {
         cancelIdleStop()
         val staleSessions: List<SecondarySession>
@@ -1244,7 +1262,7 @@ class WebRtcManager private constructor(private val context: Context) {
 
         try {
             val sender = session.peerConnection.addTrack(activeTrack, listOf(VIDEO_TRACK_ID))
-            configureVideoSender(sender, effectiveWidth, effectiveHeight, effectiveFps)
+            configureVideoSender(sender, effectiveWidth, effectiveHeight, effectiveFps, outputScale)
             synchronized(streamLock) {
                 val current = secondarySessions[sessionId]
                 if (current === session && current.streamId == streamId) {
@@ -1493,7 +1511,7 @@ class WebRtcManager private constructor(private val context: Context) {
             }
         if (!shouldShow) return
         mainHandler.post {
-            Toast.makeText(context, "Cloud stream connected", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.portal_ui_cloud_stream_connected), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1682,7 +1700,7 @@ class WebRtcManager private constructor(private val context: Context) {
     }
 
     fun requestGracefulStop(reason: String = "cloud_stop") {
-        stopAllSessions(reason)
+        stopHandler.post { stopAllSessions(reason) }
     }
 
     internal fun onSharedCaptureScreenshotCompleted(usedSharedCaptureSession: Boolean) {
@@ -2874,11 +2892,37 @@ class WebRtcManager private constructor(private val context: Context) {
         )
     }
 
-    private fun configureVideoSender(sender: RtpSender?, width: Int, height: Int, fps: Int) {
+    private fun configureVideoSender(
+        sender: RtpSender?,
+        width: Int,
+        height: Int,
+        fps: Int,
+        outputScale: Double? = null,
+    ) {
         if (sender == null) return
         val parameters = sender.parameters
         var updated = false
-        val maxBitrateBps = computeMaxBitrateBps(width, height, fps)
+        val sourceSize = synchronized(streamLock) { captureWidth to captureHeight }
+        val boundedOutputScale = outputScale?.coerceIn(0.5, 1.0)
+        val outputSize =
+            if (boundedOutputScale != null && sourceSize.first > 0 && sourceSize.second > 0) {
+                Pair(
+                    max(2, (sourceSize.first * boundedOutputScale).toInt() and -2),
+                    max(2, (sourceSize.second * boundedOutputScale).toInt() and -2),
+                )
+            } else {
+                Pair(width, height)
+            }
+        val maxBitrateBps = computeMaxBitrateBps(outputSize.first, outputSize.second, fps)
+        val scaleResolutionDownBy =
+            if (boundedOutputScale != null) {
+                senderScaleResolutionDownBy(sourceSize.first, sourceSize.second, boundedOutputScale)
+            } else {
+                max(
+                    1.0,
+                    max(sourceSize.first.toDouble() / width, sourceSize.second.toDouble() / height),
+                )
+            }
         for (encoding in parameters.encodings) {
             val currentMax = encoding.maxBitrateBps
             if (currentMax == null || currentMax > maxBitrateBps) {
@@ -2890,6 +2934,10 @@ class WebRtcManager private constructor(private val context: Context) {
                 encoding.maxFramerate = fps
                 updated = true
             }
+            if ((encoding.scaleResolutionDownBy ?: 1.0) != scaleResolutionDownBy) {
+                encoding.scaleResolutionDownBy = scaleResolutionDownBy
+                updated = true
+            }
         }
         if (parameters.degradationPreference != RtpParameters.DegradationPreference.BALANCED) {
             parameters.degradationPreference = RtpParameters.DegradationPreference.BALANCED
@@ -2899,7 +2947,7 @@ class WebRtcManager private constructor(private val context: Context) {
             val success = sender.setParameters(parameters)
             Log.i(
                 TAG,
-                "Applied sender params (maxBitrate=$maxBitrateBps, maxFps=$fps, success=$success)"
+                "Applied sender params (maxBitrate=$maxBitrateBps, maxFps=$fps, scaleDown=$scaleResolutionDownBy, success=$success)"
             )
         }
     }
