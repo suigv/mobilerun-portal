@@ -850,10 +850,9 @@ class ApiHandler(
             ForceStopUiResult(attempted = false, success = false, reason = "ui_disabled")
         }
 
-        // A background-process kill is best-effort. Only a confirmed OS force-stop
-        // may be reported as a cold-start-capable stop.
-        val forceStopped = uiResult.success
-        val overallSuccess = forceStopped
+        // UI fallback can be delayed on some devices; don't override a successful
+        // background-process kill with a transient UI readiness failure.
+        val overallSuccess = killSuccess || uiResult.success
         val resultJson = JSONObject().apply {
             put("message", "Stop requested for $packageName")
             put("killBackgroundProcesses", killSuccess)
@@ -861,11 +860,14 @@ class ApiHandler(
             put("uiAttempted", uiResult.attempted)
             put("uiSuccess", uiResult.success)
             put("uiReason", uiResult.reason ?: JSONObject.NULL)
-            put("forceStopped", forceStopped)
             put("overallSuccess", overallSuccess)
         }
 
-        return ApiResponse.RawObject(resultJson)
+        return if (overallSuccess) {
+            ApiResponse.RawObject(resultJson)
+        } else {
+            ApiResponse.Error(resultJson.toString())
+        }
     }
 
     fun getTime(): ApiResponse {
