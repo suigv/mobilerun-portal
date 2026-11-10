@@ -1296,7 +1296,7 @@ class ApiHandlerTest {
         assertEquals(ApiResponse.Success("prompting_user"), response)
         verify(exactly = 1) { handler.startStream(any()) }
         verify(exactly = 0) {
-            manager.startStreamWithExistingCapture(any(), any(), any(), any(), any())
+            manager.startStreamWithExistingCapture(any(), any(), any(), any<String>(), any())
         }
     }
 
