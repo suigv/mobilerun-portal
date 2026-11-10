@@ -1824,7 +1824,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                     if (value != null) {
                         if (value !in MIN_OFFSET..MAX_OFFSET) {
                             binding.offsetValueInputLayout.error =
-                                "Value must be between $MIN_OFFSET and $MAX_OFFSET"
+                                getString(R.string.portal_ui_number_range, MIN_OFFSET, MAX_OFFSET)
                         } else {
                             binding.offsetValueInputLayout.error = null
                             // Auto-apply if value is valid and complete
@@ -1835,12 +1835,12 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                             }
                         }
                     } else if (s.toString().isNotEmpty() && s.toString() != "-") {
-                        binding.offsetValueInputLayout.error = "Invalid number"
+                        binding.offsetValueInputLayout.error = getString(R.string.portal_ui_enter_valid_number)
                     } else {
                         binding.offsetValueInputLayout.error = null
                     }
                 } catch (e: Exception) {
-                    binding.offsetValueInputLayout.error = "Invalid number"
+                    binding.offsetValueInputLayout.error = getString(R.string.portal_ui_enter_valid_number)
                 }
             }
         })

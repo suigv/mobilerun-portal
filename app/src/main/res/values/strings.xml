@@ -487,6 +487,7 @@
     <string name="portal_ui_token_copied">Token copied</string>
     <string name="portal_ui_value_adjusted">Value adjusted to valid range</string>
     <string name="portal_ui_enter_valid_number">Please enter a valid number</string>
+    <string name="portal_ui_number_range">Value must be between %1$d and %2$d</string>
     <string name="portal_ui_error_prefix">Error: %1$s</string>
     <string name="portal_ui_error_fetching_data">Error fetching data: %1$s</string>
     <string name="portal_ui_file_access_settings">Could not open file access settings</string>

@@ -424,6 +424,7 @@
     <string name="portal_ui_token_copied">令牌已复制</string>
     <string name="portal_ui_value_adjusted">数值已调整到有效范围</string>
     <string name="portal_ui_enter_valid_number">请输入有效数字</string>
+    <string name="portal_ui_number_range">数值必须在 %1$d 到 %2$d 之间</string>
     <string name="portal_ui_error_prefix">错误：%1$s</string>
     <string name="portal_ui_error_fetching_data">获取数据失败：%1$s</string>
     <string name="portal_ui_file_access_settings">无法打开文件访问设置</string>
