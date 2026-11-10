@@ -41,6 +41,7 @@ data class PortalModelsLoadResult(
     val models: List<PortalModelOption>,
     val warningMessage: String? = null,
     val loadedFromServer: Boolean = false,
+    val coreRpaPackageApi: Boolean = false,
 )
 
 data class PortalTaskLaunchSuccess(
@@ -266,6 +267,12 @@ class PortalCloudClient(
             }
 
             return normalized.toList()
+        }
+
+        fun supportsCoreRpaPackages(body: String): Boolean = try {
+            JSONObject(body).optJSONObject("corerpa3")?.optInt("package_api", 0) == 1
+        } catch (_: Exception) {
+            false
         }
 
         fun buildModelOptions(modelIds: List<String>): List<PortalModelOption> {
@@ -910,6 +917,7 @@ class PortalCloudClient(
                         PortalModelsLoadResult(
                             models = buildModelOptions(normalizedIds),
                             loadedFromServer = true,
+                            coreRpaPackageApi = supportsCoreRpaPackages(body),
                         ),
                     )
                 }

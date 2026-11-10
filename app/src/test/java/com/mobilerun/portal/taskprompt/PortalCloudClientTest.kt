@@ -11,6 +11,14 @@ import java.time.Instant
 class PortalCloudClientTest {
 
     @Test
+    fun coreRpaCapabilityRequiresExplicitSupportedVersion() {
+        assertTrue(PortalCloudClient.supportsCoreRpaPackages("""{"corerpa3":{"package_api":1}}"""))
+        assertFalse(PortalCloudClient.supportsCoreRpaPackages("""{"models":["model-a"]}"""))
+        assertFalse(PortalCloudClient.supportsCoreRpaPackages("""{"corerpa3":{"package_api":2}}"""))
+        assertFalse(PortalCloudClient.supportsCoreRpaPackages("not json"))
+    }
+
+    @Test
     fun defaultModel_matchesServerCatalogDefault() {
         assertEquals("mobilerun/mobile-agent-fast", PortalCloudClient.DEFAULT_MODEL_ID)
     }

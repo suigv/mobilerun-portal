@@ -50,6 +50,7 @@ class TaskPromptCardController(
     private var isHistoryEnabled = false
     private var taskState: TaskStateViewModel? = null
     private var suppressReturnToPortalChange = false
+    private var coreRpaMode = false
     private val settingsController = TaskPromptSettingsPanelController(
         context,
         binding.taskPromptSettingsPanel,
@@ -107,6 +108,22 @@ class TaskPromptCardController(
 
     fun setModelOptions(options: List<PortalModelOption>) {
         settingsController.setModelOptions(options)
+        updateSubmitButtonState()
+    }
+
+    fun setCoreRpaMode(enabled: Boolean) {
+        coreRpaMode = enabled
+        settingsController.setCoreRpaMode(enabled)
+        binding.taskPromptCardTitle.setText(
+            if (enabled) R.string.corerpa_goal_title else R.string.task_prompt_card_title,
+        )
+        binding.taskPromptCardSubtitle.setText(
+            if (enabled) R.string.corerpa_goal_subtitle else R.string.task_prompt_card_subtitle,
+        )
+        binding.taskPromptHistoryButton.setText(
+            if (enabled) R.string.corerpa_goals_title else R.string.task_prompt_history_button,
+        )
+        binding.taskPromptReturnToPortalSwitch.visibility = if (enabled) View.GONE else View.VISIBLE
         updateSubmitButtonState()
     }
 
@@ -195,6 +212,7 @@ class TaskPromptCardController(
         binding.taskPromptSubmitButton.text = when {
             isSubmitting -> context.getString(R.string.task_prompt_starting_button)
             showRunningState -> context.getString(R.string.task_prompt_running_button)
+            coreRpaMode -> context.getString(R.string.corerpa_goal_submit)
             else -> context.getString(R.string.task_prompt_submit)
         }
         binding.taskPromptSubmitProgress.visibility = if (showRunningState) View.VISIBLE else View.GONE

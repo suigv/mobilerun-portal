@@ -70,6 +70,7 @@ class TaskPromptSettingsPanelController(
     private var isEnabled = true
     private var isModelsLoading = false
     private var isAdvancedExpanded = false
+    private var coreRpaMode = false
     private var selectedModelId: String? = null
 
     init {
@@ -163,6 +164,13 @@ class TaskPromptSettingsPanelController(
 
     fun hasModels(): Boolean = modelOptions.isNotEmpty()
 
+    fun setCoreRpaMode(enabled: Boolean) {
+        coreRpaMode = enabled
+        binding.taskPromptCapabilitiesRow.visibility = if (enabled) View.GONE else View.VISIBLE
+        advancedHeader.visibility = if (enabled) View.GONE else View.VISIBLE
+        advancedContent.visibility = if (!enabled && isAdvancedExpanded) View.VISIBLE else View.GONE
+    }
+
     fun buildSettingsOrShowErrors(): PortalTaskSettings? {
         modelInputLayout.error = null
         maxStepsInputLayout.error = null
@@ -173,6 +181,11 @@ class TaskPromptSettingsPanelController(
         if (modelId.isNullOrBlank()) {
             modelInputLayout.error = context.getString(R.string.task_prompt_model_required)
             return null
+        }
+
+        if (coreRpaMode) {
+            currentSettings = currentSettings.copy(llmModel = modelId)
+            return currentSettings
         }
 
         val maxSteps = maxStepsInput.text?.toString()?.trim()?.toIntOrNull()

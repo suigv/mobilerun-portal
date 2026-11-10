@@ -26,10 +26,20 @@ object PortalTaskStateMonitor {
     private var statusRequestInFlight = false
     private var pollRunnable: Runnable? = null
     private var cancellingSince: Pair<String, Long>? = null
+    private var coreRpaConnection = false
 
     fun initialize(context: Context) {
         if (::appContext.isInitialized) return
         appContext = context.applicationContext
+    }
+
+    fun setCoreRpaConnection(enabled: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { setCoreRpaConnection(enabled) }
+            return
+        }
+        coreRpaConnection = enabled
+        if (enabled) stopScheduledPoll()
     }
 
     /** Starts the poll grace window for a cancel the user just requested. */
@@ -45,6 +55,11 @@ object PortalTaskStateMonitor {
         if (!::appContext.isInitialized) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mainHandler.post { reconcileActiveTask(immediate) }
+            return
+        }
+
+        if (coreRpaConnection) {
+            stopScheduledPoll()
             return
         }
 
@@ -107,6 +122,7 @@ object PortalTaskStateMonitor {
 
     private fun pollActiveTaskStatus() {
         if (!::appContext.isInitialized) return
+        if (coreRpaConnection) return
 
         val configManager = ConfigManager.getInstance(appContext)
         val activeTask = configManager.activePortalTask ?: run {
@@ -134,6 +150,7 @@ object PortalTaskStateMonitor {
         portalCloudClient.getTaskStatus(restBaseUrl, authToken, activeTask.taskId) { result ->
             mainHandler.post {
                 statusRequestInFlight = false
+                if (coreRpaConnection) return@post
                 when (result) {
                     is PortalTaskStatusResult.Success -> handleStatusSuccess(activeTask, result.value.status)
                     is PortalTaskStatusResult.Error -> schedulePoll(POLL_INTERVAL_MS)

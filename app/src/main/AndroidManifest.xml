@@ -239,6 +239,11 @@
             android:exported="false" />
 
         <activity
+            android:name=".ui.taskprompt.CoreRpaPackagesActivity"
+            android:theme="@style/Theme.Mobilerun"
+            android:exported="false" />
+
+        <activity
             android:name=".ui.taskprompt.TaskDetailsActivity"
             android:theme="@style/Theme.Mobilerun"
             android:exported="false" />

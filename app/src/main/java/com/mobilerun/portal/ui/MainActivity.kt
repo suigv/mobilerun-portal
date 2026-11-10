@@ -34,6 +34,9 @@ import com.mobilerun.portal.databinding.ActivityMainBinding
 import com.mobilerun.portal.taskprompt.PortalActiveTaskRecord
 import com.mobilerun.portal.taskprompt.PortalBalanceCacheState
 import com.mobilerun.portal.taskprompt.PortalCloudClient
+import com.mobilerun.portal.taskprompt.CoreRpaClient
+import com.mobilerun.portal.taskprompt.CoreRpaRequestKeys
+import com.mobilerun.portal.taskprompt.CoreRpaResult
 import com.mobilerun.portal.taskprompt.PortalModelOption
 import com.mobilerun.portal.taskprompt.PortalBalanceRepository
 import com.mobilerun.portal.taskprompt.PortalTaskCancelResult
@@ -50,6 +53,7 @@ import com.mobilerun.portal.taskprompt.PortalTaskUiSupport
 import com.mobilerun.portal.taskprompt.TaskPromptNotificationManager
 import com.mobilerun.portal.taskprompt.TaskPromptModelUiState
 import com.mobilerun.portal.ui.taskprompt.TaskPromptCardController
+import com.mobilerun.portal.ui.taskprompt.CoreRpaPackagesActivity
 import com.mobilerun.portal.ui.taskprompt.TaskDetailsActivity
 import com.mobilerun.portal.ui.taskprompt.TaskHistoryActivity
 import com.mobilerun.portal.ui.settings.SettingsActivity
@@ -85,6 +89,9 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
     private var isSignatureConflictReceiverRegistered = false
     private lateinit var taskPromptCardController: TaskPromptCardController
     private val portalCloudClient = PortalCloudClient()
+    private val coreRpaClient = CoreRpaClient()
+    private val coreRpaRequestKeys by lazy { CoreRpaRequestKeys(this) }
+    private var isCoreRpaConnection = false
     private lateinit var taskLaunchCoordinator: PortalTaskLaunchCoordinator
     private var taskPromptModels: List<PortalModelOption> = emptyList()
     private var taskPromptModelsFingerprint: String? = null
@@ -548,7 +555,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
         val authToken = configManager.reverseConnectionToken.trim()
         val restBaseUrl =
             PortalCloudClient.deriveRestBaseUrl(configManager.reverseConnectionUrlOrDefault)
-        val activeTask = configManager.activePortalTask
+        val activeTask = if (isCoreRpaConnection) null else configManager.activePortalTask
 
         if (activeTask == null ||
             activeTask.taskId != activeTaskDetails?.taskId ||
@@ -692,6 +699,11 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
         authToken: String,
         modelsFingerprint: String,
     ) {
+        if (taskPromptModelsFingerprint != modelsFingerprint) {
+            isCoreRpaConnection = false
+            taskPromptCardController.setCoreRpaMode(false)
+            PortalTaskStateMonitor.setCoreRpaConnection(false)
+        }
         isTaskPromptModelsLoading = true
         taskPromptModelsFingerprint = modelsFingerprint
         taskPromptCardController.setModelsLoading(true)
@@ -705,10 +717,18 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
 
         portalCloudClient.loadModels(restBaseUrl, authToken) { result ->
             runOnUiThread {
+                val currentConfig = ConfigManager.getInstance(this)
+                val currentBase = PortalCloudClient.deriveRestBaseUrl(currentConfig.reverseConnectionUrlOrDefault)
+                if (taskPromptModelsFingerprint != modelsFingerprint ||
+                    "$currentBase|${currentConfig.reverseConnectionToken.trim()}" != modelsFingerprint
+                ) return@runOnUiThread
                 isTaskPromptModelsLoading = false
                 val loadedModels = result.loadedFromServer && result.models.isNotEmpty()
                 val configManager = ConfigManager.getInstance(this)
                 if (loadedModels) {
+                    isCoreRpaConnection = result.coreRpaPackageApi
+                    taskPromptCardController.setCoreRpaMode(isCoreRpaConnection)
+                    PortalTaskStateMonitor.setCoreRpaConnection(isCoreRpaConnection)
                     syncTaskPromptModelSelection(configManager, result.models)
                 }
                 taskPromptModels = result.models
@@ -718,12 +738,13 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 taskPromptCardController.setSubmitting(isTaskPromptSubmitting)
                 taskPromptCardController.setSubmissionEnabled(
                     !isTaskPromptSubmitting &&
-                        ConfigManager.getInstance(this).activePortalTask?.let {
+                        (isCoreRpaConnection || ConfigManager.getInstance(this).activePortalTask?.let {
                             !PortalTaskTracking.isBlockingStatus(it.lastStatus)
-                        } != false,
+                        } != false),
                 )
                 taskPromptCardController.setModelRetryVisible(!loadedModels)
                 updateTaskPromptStatus(result.warningMessage, TaskPromptCardController.StatusKind.INFO)
+                if (loadedModels) refreshTaskPromptUi()
             }
         }
     }
@@ -762,6 +783,11 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 getString(R.string.task_prompt_unsupported_custom_url),
                 TaskPromptCardController.StatusKind.ERROR,
             )
+            return
+        }
+
+        if (isCoreRpaConnection) {
+            submitCoreRpaGoal(restBaseUrl, authToken, configManager.deviceID, draft)
             return
         }
 
@@ -816,6 +842,48 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                         refreshTaskPromptUi()
                     }
                 }
+            }
+        }
+    }
+
+    private fun submitCoreRpaGoal(
+        restBaseUrl: String,
+        authToken: String,
+        deviceId: String,
+        draft: PortalTaskDraft,
+    ) {
+        val requestKey = try {
+            coreRpaRequestKeys.keyFor(restBaseUrl, deviceId, draft.prompt, draft.settings.llmModel)
+        } catch (_: IllegalStateException) {
+            updateTaskPromptStatus(getString(R.string.corerpa_request_key_error), TaskPromptCardController.StatusKind.ERROR)
+            return
+        }
+        isTaskPromptSubmitting = true
+        taskPromptCardController.setSubmitting(true)
+        taskPromptCardController.setSubmissionEnabled(false)
+        updateTaskPromptStatus(null)
+        coreRpaClient.create(restBaseUrl, authToken, deviceId, draft.prompt, draft.settings.llmModel, requestKey) { result ->
+            runOnUiThread {
+                isTaskPromptSubmitting = false
+                taskPromptCardController.setSubmitting(false)
+                when (result) {
+                    is CoreRpaResult.Success -> {
+                        coreRpaRequestKeys.completed(restBaseUrl, deviceId, draft.prompt, draft.settings.llmModel, requestKey)
+                        val currentConfig = ConfigManager.getInstance(this)
+                        val currentBase = PortalCloudClient.deriveRestBaseUrl(currentConfig.reverseConnectionUrlOrDefault)
+                        if (currentBase == restBaseUrl && currentConfig.reverseConnectionToken.trim() == authToken) {
+                            currentConfig.saveTaskPromptSettings(draft.settings)
+                            taskPromptCardController.clearPrompt()
+                            updateTaskPromptStatus(getString(R.string.corerpa_goal_created))
+                            startActivity(CoreRpaPackagesActivity.createIntent(this, result.value.id))
+                        }
+                    }
+                    is CoreRpaResult.Failure -> updateTaskPromptStatus(
+                        if (result.outcomeUnknown) getString(R.string.corerpa_goal_unknown) else result.message,
+                        TaskPromptCardController.StatusKind.ERROR,
+                    )
+                }
+                refreshTaskPromptUi()
             }
         }
     }
@@ -927,6 +995,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
     }
 
     private fun syncTaskPromptPolling(immediate: Boolean = false) {
+        if (isCoreRpaConnection) return
         val activeTask = ConfigManager.getInstance(this).activePortalTask
         if (!isTaskPromptVisible || activeTask == null) {
             return
@@ -1081,7 +1150,10 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
     }
 
     private fun openTaskHistory() {
-        startActivity(TaskHistoryActivity.createIntent(this))
+        startActivity(
+            if (isCoreRpaConnection) CoreRpaPackagesActivity.createIntent(this)
+            else TaskHistoryActivity.createIntent(this),
+        )
     }
 
     private fun openTaskDetails(taskId: String) {
