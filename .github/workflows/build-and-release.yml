@@ -35,10 +35,10 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION_NAME="${GITHUB_REF#refs/tags/v}"
-            VERSION_CODE="${GITHUB_RUN_NUMBER}"
+            VERSION_CODE="$(grep '^versionCode=' gradle.properties | cut -d= -f2-)"
           elif [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION_NAME="${GITHUB_REF#refs/tags/}"
-            VERSION_CODE="${GITHUB_RUN_NUMBER}"
+            VERSION_CODE="$(grep '^versionCode=' gradle.properties | cut -d= -f2-)"
           else
             VERSION_NAME="$(grep '^versionName=' gradle.properties | cut -d= -f2-)"
             VERSION_CODE="$(grep '^versionCode=' gradle.properties | cut -d= -f2-)"
@@ -55,6 +55,11 @@ jobs:
           [[ -n "${DROIDRUN_KEYSTORE_BASE64}" ]]
           echo "${DROIDRUN_KEYSTORE_BASE64}" | base64 -d > "${RUNNER_TEMP}/keystore.jks"
           echo "DROIDRUN_KEYSTORE_PATH=${RUNNER_TEMP}/keystore.jks" >> "${GITHUB_ENV}"
+
+      - name: Check Chinese resources and unit tests
+        run: |
+          python3 scripts/check_zh_resources.py
+          ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build with Gradle
         env:
@@ -205,7 +210,7 @@ jobs:
 
   deploy-r2:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'droidrun/mobilerun-portal'
     uses: ./.github/workflows/deploy-r2.yml
     with:
       artifact-name: app-release

@@ -435,6 +435,209 @@ class MobilerunContentProviderTest {
     }
 
     @Test
+    fun buildStreamSessionLimitResponse_reportsLimitAndRange() {
+        val configManager = mockk<ConfigManager>()
+        every { configManager.streamSessionLimit } returns 4
+
+        val result = buildStreamSessionLimitResponse(configManager) as ApiResponse.RawObject
+
+        assertEquals(4, result.json.getInt("limit"))
+        assertEquals(1, result.json.getInt("min"))
+        assertEquals(5, result.json.getInt("max"))
+    }
+
+    @Test
+    fun handleStreamSessionLimitInsert_storesLimitInRange() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsInteger("limit") } returns 5
+
+        val result = handleStreamSessionLimitInsert(configManager, values)
+
+        assertEquals(ApiResponse.Success("Stream session limit set to 5"), result)
+        verify(exactly = 1) { configManager.setStreamSessionLimitWithNotification(5) }
+    }
+
+    @Test
+    fun handleStreamSessionLimitInsert_rejectsLimitOutOfRange() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+
+        for (limit in listOf(0, 6, -1)) {
+            every { values.getAsInteger("limit") } returns limit
+
+            val result = handleStreamSessionLimitInsert(configManager, values)
+
+            assertEquals(ApiResponse.Error("limit must be between 1 and 5"), result)
+        }
+        verify(exactly = 0) { configManager.setStreamSessionLimitWithNotification(any()) }
+    }
+
+    @Test
+    fun handleStreamSessionLimitInsert_rejectsMissingLimit() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsInteger("limit") } returns null
+
+        assertEquals(
+            ApiResponse.Error("Missing required integer field: limit"),
+            handleStreamSessionLimitInsert(configManager, values),
+        )
+        assertEquals(
+            ApiResponse.Error("Missing required integer field: limit"),
+            handleStreamSessionLimitInsert(configManager, null),
+        )
+        verify(exactly = 0) { configManager.setStreamSessionLimitWithNotification(any()) }
+    }
+
+    @Test
+    fun handleSmsGatewayInsert_setsSwitch() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+
+        every { values.getAsBoolean("enabled") } returns true
+        assertEquals(
+            ApiResponse.Success("SMS gateway set to true"),
+            handleSmsGatewayInsert(configManager, values),
+        )
+        every { values.getAsBoolean("enabled") } returns false
+        assertEquals(
+            ApiResponse.Success("SMS gateway set to false"),
+            handleSmsGatewayInsert(configManager, values),
+        )
+
+        verifySequence {
+            configManager.smsGatewayEnabled = true
+            configManager.smsGatewayEnabled = false
+        }
+    }
+
+    @Test
+    fun handleSmsGatewayInsert_rejectsMissingEnabled() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsBoolean("enabled") } returns null
+
+        assertEquals(
+            ApiResponse.Error("Missing required field: enabled"),
+            handleSmsGatewayInsert(configManager, values),
+        )
+        assertEquals(
+            ApiResponse.Error("Missing required field: enabled"),
+            handleSmsGatewayInsert(configManager, null),
+        )
+        verify(exactly = 0) { configManager.smsGatewayEnabled = any() }
+    }
+
+    @Test
+    fun handleDeviceAudioInsert_setsFlagAndReportsMissingPermission() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+
+        every { values.getAsBoolean("enabled") } returns true
+        assertEquals(
+            ApiResponse.Success("Device audio set to true"),
+            handleDeviceAudioInsert(configManager, values, permissionGranted = true, supported = true),
+        )
+        assertEquals(
+            ApiResponse.Success("Device audio set to true; RECORD_AUDIO permission is missing"),
+            handleDeviceAudioInsert(configManager, values, permissionGranted = false, supported = true),
+        )
+        assertEquals(
+            ApiResponse.Success("Device audio set to true; device audio needs Android 10+"),
+            handleDeviceAudioInsert(configManager, values, permissionGranted = true, supported = false),
+        )
+        every { values.getAsBoolean("enabled") } returns false
+        assertEquals(
+            ApiResponse.Success("Device audio set to false"),
+            handleDeviceAudioInsert(configManager, values, permissionGranted = false, supported = true),
+        )
+
+        verifySequence {
+            configManager.deviceAudioEnabled = true
+            configManager.deviceAudioEnabled = true
+            configManager.deviceAudioEnabled = true
+            configManager.deviceAudioEnabled = false
+        }
+    }
+
+    @Test
+    fun handleDeviceAudioInsert_rejectsMissingEnabled() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+
+        assertEquals(
+            ApiResponse.Error("Missing required field: enabled"),
+            handleDeviceAudioInsert(configManager, null, permissionGranted = true, supported = true),
+        )
+        verify(exactly = 0) { configManager.deviceAudioEnabled = any() }
+    }
+
+    @Test
+    fun buildDeviceAudioStatus_reportsFlagPermissionAndSupport() {
+        val configManager = mockk<ConfigManager>()
+        every { configManager.deviceAudioEnabled } returns true
+
+        val json = (buildDeviceAudioStatus(configManager, permissionGranted = false, supported = true) as ApiResponse.RawObject).json
+
+        assertTrue(json.getBoolean("enabled"))
+        assertFalse(json.getBoolean("permissionGranted"))
+        assertTrue(json.getBoolean("supported"))
+    }
+
+    @Test
+    fun handleReconnectAfterRestartInsert_enablesWithCredentials() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsBoolean("enabled") } returns true
+        every { configManager.hasCloudCredentials } returns true
+        every { configManager.reconnectAfterRestartEnabled } returns true
+
+        val result = handleReconnectAfterRestartInsert(configManager, values)
+
+        assertTrue(result is ApiResponse.RawObject)
+        val json = (result as ApiResponse.RawObject).json
+        assertTrue(json.getBoolean("enabled"))
+        assertTrue(json.getBoolean("credentialsPresent"))
+        verify { configManager.reconnectAfterRestartEnabled = true }
+    }
+
+    @Test
+    fun handleReconnectAfterRestartInsert_refusesToEnableWithoutCredentials() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsBoolean("enabled") } returns true
+        every { configManager.hasCloudCredentials } returns false
+
+        assertEquals(
+            ApiResponse.Error("Connect to Mobilerun first: no cloud credentials are saved"),
+            handleReconnectAfterRestartInsert(configManager, values),
+        )
+        verify(exactly = 0) { configManager.reconnectAfterRestartEnabled = any() }
+    }
+
+    @Test
+    fun handleReconnectAfterRestartInsert_disablesWithoutCredentials() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+        val values = mockk<ContentValues>()
+        every { values.getAsBoolean("enabled") } returns false
+        every { configManager.hasCloudCredentials } returns false
+
+        assertTrue(handleReconnectAfterRestartInsert(configManager, values) is ApiResponse.RawObject)
+        verify { configManager.reconnectAfterRestartEnabled = false }
+    }
+
+    @Test
+    fun handleReconnectAfterRestartInsert_rejectsMissingEnabled() {
+        val configManager = mockk<ConfigManager>(relaxed = true)
+
+        assertEquals(
+            ApiResponse.Error("Missing required field: enabled"),
+            handleReconnectAfterRestartInsert(configManager, null),
+        )
+        verify(exactly = 0) { configManager.reconnectAfterRestartEnabled = any() }
+    }
+
+    @Test
     fun handleCloudConnectInsert_storesApiKeyAndStartsReverseService() {
         val context = mockk<Context>(relaxed = true)
         val configManager = mockk<ConfigManager>(relaxed = true)
@@ -467,7 +670,6 @@ class MobilerunContentProviderTest {
             configManager.defaultReverseConnectionUrl
             configManager.reverseConnectionUrl = defaultUrl
             configManager.reverseConnectionToken = "real-token"
-            configManager.forceLoginOnNextConnect = false
             configManager.reverseConnectionEnabled = true
         }
     }
@@ -504,7 +706,6 @@ class MobilerunContentProviderTest {
         verifySequence {
             configManager.reverseConnectionUrl = url
             configManager.reverseConnectionToken = "aliased-token"
-            configManager.forceLoginOnNextConnect = false
             configManager.reverseConnectionEnabled = true
         }
     }
@@ -761,6 +962,8 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.reconnectAfterRestartEnabled } returns true
+        every { configManager.cloudSessionActive } returns false
         every { configManager.reverseJoinHttp402Snapshot() } returns
             ReverseJoinHttp402Snapshot(
                 blocked = false,
@@ -777,6 +980,8 @@ class MobilerunContentProviderTest {
         assertEquals("CONNECTED", json.getString("connectionState"))
         assertTrue(json.getBoolean("tokenPresent"))
         assertEquals("device-123", json.getString("deviceId"))
+        assertTrue(json.getBoolean("reconnectAfterRestart"))
+        assertEquals("api_key", json.getString("credentialType"))
         assertFalse(json.toString().contains("super-secret"))
     }
 
@@ -788,6 +993,8 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.reconnectAfterRestartEnabled } returns true
+        every { configManager.cloudSessionActive } returns false
         every { configManager.reverseJoinHttp402Snapshot() } returns
             ReverseJoinHttp402Snapshot(
                 blocked = true,
@@ -812,6 +1019,8 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.reconnectAfterRestartEnabled } returns true
+        every { configManager.cloudSessionActive } returns false
         every { configManager.reverseJoinHttp402Snapshot() } returns
             ReverseJoinHttp402Snapshot(
                 blocked = true,
@@ -846,6 +1055,7 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.cloudSessionActive } returns false
         every { configManager.taskPromptSettings } returns defaultSettings
         every { configManager.taskPromptReturnToPortal } returns false
 
@@ -1000,6 +1210,7 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.cloudSessionActive } returns false
         every { configManager.taskPromptSettings } returns PortalTaskSettings()
         every { configManager.taskPromptReturnToPortal } returns false
 
@@ -1023,6 +1234,7 @@ class MobilerunContentProviderTest {
         every { configManager.reverseConnectionUrlOrDefault } returns
             "wss://api.mobilerun.ai/v1/providers/personal/join"
         every { configManager.activePortalTask } returns null
+        every { configManager.cloudSessionActive } returns false
         every { configManager.taskPromptSettings } returns PortalTaskSettings()
         every { configManager.taskPromptReturnToPortal } returns false
 

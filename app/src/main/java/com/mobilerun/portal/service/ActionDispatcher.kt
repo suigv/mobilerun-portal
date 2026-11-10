@@ -2,6 +2,7 @@ package com.mobilerun.portal.service
 
 import com.mobilerun.portal.api.ApiHandler
 import com.mobilerun.portal.api.ApiResponse
+import com.mobilerun.portal.sms.SmsBridgeApi
 import com.mobilerun.portal.triggers.TriggerApi
 import com.mobilerun.portal.triggers.TriggerApiResult
 import org.json.JSONArray
@@ -68,10 +69,11 @@ class ActionDispatcher(
         requestId: Any? = null,
     ): ApiResponse {
         // Normalize action name (handle both "action.tap" and "/action/tap" styles)
-        return when (
-            val method =
-                action.removePrefix("/action/").removePrefix("action.").removePrefix("/")
-        ) {
+        val normalized = action.removePrefix("/action/").removePrefix("action.").removePrefix("/")
+        if (origin == Origin.WEBSOCKET_REVERSE && SmsBridgeApi.isBridgeCall(normalized, params)) {
+            return apiHandler.handleSmsBridge(normalized, params)
+        }
+        return when (val method = normalized) {
             "tap" -> {
                 val x = params.optInt("x", 0)
                 val y = params.optInt("y", 0)
@@ -111,16 +113,29 @@ class ActionDispatcher(
                 apiHandler.startApp(pkg, finalActivity)
             }
 
-            "app/deep-link" -> {
-                val deepLink =
-                    if (params.has("deepLink") && !params.isNull("deepLink")) {
-                        params.optString("deepLink", "")
-                    } else {
-                        ""
-                    }
-                if (deepLink.isBlank() || deepLink.trim() == "null") {
-                    return ApiResponse.Error("Missing required param: 'deepLink'")
+            "app/deep-links", "app/deep-link/resolve" -> {
+                val packageName = if (hasCanonicalPackage(params)) {
+                    optionalString(params, "package")
+                } else {
+                    optionalString(params, "packageName")
                 }
+                if (packageName.isNullOrBlank()) {
+                    return ApiResponse.Error("Missing required param: 'package'")
+                }
+                if (method == "app/deep-links") {
+                    apiHandler.getDeepLinks(packageName)
+                } else {
+                    val deepLink = optionalString(params, "deepLink")
+                    if (deepLink.isNullOrBlank()) {
+                        return ApiResponse.Error("Missing required param: 'deepLink'")
+                    }
+                    apiHandler.resolveDeepLink(packageName, deepLink, optionalString(params, "action"))
+                }
+            }
+
+            "app/deep-link" -> {
+                val deepLink = optionalString(params, "deepLink")
+                    ?: return ApiResponse.Error("Missing required param: 'deepLink'")
 
                 val displayId = params.optInt("displayId", 0)
                 if (displayId < 0) {
@@ -218,6 +233,18 @@ class ActionDispatcher(
                 apiHandler.getTime()
             }
 
+            "timezone/get" -> {
+                apiHandler.getTimeZone()
+            }
+
+            "location/get" -> {
+                if (origin != Origin.WEBSOCKET_REVERSE) {
+                    ApiResponse.Error("location/get requires reverse WebSocket connection")
+                } else {
+                    apiHandler.getLocation()
+                }
+            }
+
             "files/list" -> {
                 val path = params.optString("path", "")
                 apiHandler.listFiles(path)
@@ -264,6 +291,26 @@ class ActionDispatcher(
                 val url = params.optString("url", "")
                 val path = params.optString("path", "")
                 apiHandler.pushFile(url, path)
+            }
+
+            "sms/capabilities" -> {
+                apiHandler.getSmsCapabilities()
+            }
+
+            "sms/send" -> {
+                apiHandler.sendSms(params)
+            }
+
+            "sms/status" -> {
+                apiHandler.getSmsStatus(params)
+            }
+
+            "sms/messages/list" -> {
+                apiHandler.listSmsMessages(params)
+            }
+
+            "sms/messages/get" -> {
+                apiHandler.getSmsMessage(params)
             }
 
             "triggers/catalog" -> {
@@ -369,6 +416,19 @@ class ActionDispatcher(
                     apiHandler.getScreenKeepAwakeStatus()
                 }
             }
+
+            "cloud/reconnectAfterRestart/set" -> {
+                if (origin == Origin.WEBSOCKET_REVERSE) {
+                    ApiResponse.Error("Reconnect after restart can only be changed on the device")
+                } else {
+                    if (!params.has("enabled")) {
+                        return ApiResponse.Error("Missing required param: 'enabled'")
+                    }
+                    apiHandler.setReconnectAfterRestartEnabled(params.optBoolean("enabled"))
+                }
+            }
+
+            "cloud/reconnectAfterRestart/status" -> apiHandler.getReconnectAfterRestartStatus()
 
             "install" -> {
                 if (origin == Origin.HTTP)

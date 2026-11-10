@@ -1,5 +1,6 @@
 package com.mobilerun.portal.ui.settings
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -9,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -17,15 +19,26 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.mobilerun.portal.auth.DeviceCodeAuthClient
 import com.mobilerun.portal.R
+import com.mobilerun.portal.location.AndroidLocationSource
 import com.mobilerun.portal.api.ApiHandler
+import com.mobilerun.portal.api.ApiResponse
 import com.mobilerun.portal.config.ConfigManager
 import com.mobilerun.portal.databinding.ActivitySettingsBinding
 import com.mobilerun.portal.events.model.EventType
 import com.mobilerun.portal.keepalive.KeepAliveController
+import com.mobilerun.portal.service.AutoAcceptGate
 import com.mobilerun.portal.service.MobilerunNotificationListener
 import com.mobilerun.portal.service.ReverseConnectionService
 import com.mobilerun.portal.service.performExplicitReverseConnectionDisconnect
+import com.mobilerun.portal.service.setReconnectAfterRestart
+import com.mobilerun.portal.sms.SmsBridgeReporter
+import com.mobilerun.portal.sms.SmsCloud
+import com.mobilerun.portal.sms.SmsCloudSims
+import com.mobilerun.portal.sms.SmsSimInfo
+import com.mobilerun.portal.sms.SmsSubscriptionResolver
+import com.mobilerun.portal.sms.SmsSubscriptionsResult
 import com.mobilerun.portal.state.ConnectionState
 import com.mobilerun.portal.state.ConnectionStateManager
 import com.mobilerun.portal.taskprompt.PortalBalanceRepository
@@ -47,6 +60,11 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
     private val portalCloudClient = PortalCloudClient()
     private var suppressSocketServerSwitchCallback = false
     private var suppressWebSocketSwitchCallback = false
+    private var suppressDeviceAudioSwitchCallback = false
+    private var suppressSmsCloudSwitchCallback = false
+    private var suppressLocationSwitchCallback = false
+    private var backgroundLocationAsked = false
+    private var smsCloudEnabling = false
     private var isInstallReceiverRegistered = false
     private var isSignatureConflictReceiverRegistered = false
 
@@ -61,7 +79,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                 android.widget.Toast.makeText(
                     this@SettingsActivity,
                     message.ifBlank {
-                        if (success) "Update installed successfully" else "Update failed"
+                        getString(if (success) R.string.portal_ui_update_installed else R.string.portal_ui_update_failed)
                     },
                     android.widget.Toast.LENGTH_LONG,
                 ).show()
@@ -89,10 +107,61 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         if (isGranted) {
             android.widget.Toast.makeText(
                 this,
-                "Notification permission granted",
+                getString(R.string.portal_ui_notification_permission_granted),
                 android.widget.Toast.LENGTH_SHORT
             ).show()
         }
+    }
+
+    private val requestSmsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        updatePermissionSwitches()
+        SmsBridgeReporter.onPermissionsChanged()
+    }
+
+    private val requestSmsCloudPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        updatePermissionSwitches()
+        if (SMS_CLOUD_REQUIRED_PERMISSIONS.all(::isPermissionGranted)) {
+            continueSmsCloudEnable()
+        } else {
+            android.widget.Toast.makeText(this, R.string.sms_cloud_permissions_denied, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val requestPhoneNumbersPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        renderSmsCloud()
+    }
+
+    private val requestLocationPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        val location = AndroidLocationSource(this)
+        when {
+            location.hasForegroundPermission() -> if (!location.hasBackgroundPermission()) requestBackgroundLocation()
+            // Denied for good: the request returns at once without a dialog. Empty = dismissed.
+            result.isNotEmpty() &&
+                !shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_FINE_LOCATION) -> openAppDetails()
+        }
+        renderLocation()
+    }
+
+    private val requestBackgroundLocationLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        renderLocation()
+    }
+
+    private val requestRecordAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { isGranted ->
+        AutoAcceptGate.disarmRecordAudio()
+        configManager.deviceAudioEnabled = isGranted
+        updateDeviceAudioStatus()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,7 +177,9 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         setupServerSettings()
         setupWebSocketSettings()
         setupReverseConnectionSettings()
+        setupStreamSessionLimit()
         setupPermissions()
+        setupLocation()
         setupAutomation()
         setupEventFilters()
         setupUpdateSection()
@@ -124,6 +195,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
     override fun onResume() {
         super.onResume()
         updatePermissionSwitches()
+        renderLocation()
         syncServerSettingsFromConfig()
         refreshCreditsBalance()
         refreshCurrentVersion()
@@ -148,6 +220,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
     override fun onStop() {
         super.onStop()
         configManager.removeListener(this)
+        commitStreamSessionLimitInput(showError = false)
         persistReverseConnectionInputs()
         unregisterUpdateReceivers()
     }
@@ -215,10 +288,55 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         }
     }
 
+    private fun setupStreamSessionLimit() {
+        binding.textStreamSessionLimitDescription.text = getString(
+            com.mobilerun.portal.R.string.stream_session_limit_description,
+            ConfigManager.MIN_STREAM_SESSION_LIMIT,
+            ConfigManager.MAX_STREAM_SESSION_LIMIT,
+        )
+        binding.inputStreamSessionLimit.setText(configManager.streamSessionLimit.toString())
+        binding.inputStreamSessionLimit.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                if (commitStreamSessionLimitInput(showError = true)) {
+                    binding.inputStreamSessionLimit.clearFocus()
+                }
+                true
+            } else {
+                false
+            }
+        }
+        binding.inputStreamSessionLimit.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) commitStreamSessionLimitInput(showError = false)
+        }
+    }
+
+    // Invalid input shows an error on Done and is reverted when the field is left.
+    private fun commitStreamSessionLimitInput(showError: Boolean): Boolean {
+        val min = ConfigManager.MIN_STREAM_SESSION_LIMIT
+        val max = ConfigManager.MAX_STREAM_SESSION_LIMIT
+        val limit = binding.inputStreamSessionLimit.text?.toString()?.toIntOrNull()
+        if (limit != null && limit in min..max) {
+            if (limit != configManager.streamSessionLimit) {
+                configManager.setStreamSessionLimitWithNotification(limit)
+            }
+            return true
+        }
+        if (showError) {
+            binding.inputStreamSessionLimit.error = getString(com.mobilerun.portal.R.string.stream_session_limit_invalid, min, max)
+        } else {
+            updateStreamSessionLimitUi(configManager.streamSessionLimit)
+        }
+        return false
+    }
+
     private fun setupReverseConnectionSettings() {
         binding.switchReverseEnabled.isChecked = configManager.reverseConnectionEnabled
         binding.inputReverseUrl.setText(configManager.reverseConnectionUrl)
-        binding.inputReverseToken.setText(configManager.reverseConnectionToken)
+        binding.inputReverseToken.setText(
+            configManager.reverseConnectionToken.takeUnless { configManager.cloudSessionActive }.orEmpty(),
+        )
+        binding.layoutReverseToken.helperText =
+            if (configManager.cloudSessionActive) getString(R.string.signed_in_with_mobilerun) else null
         binding.inputReverseToken.addWhitespaceStrippingWatcher()
 
         binding.switchReverseEnabled.setOnCheckedChangeListener { _, isChecked ->
@@ -232,10 +350,11 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                 val url = binding.inputReverseUrl.text.toString().ifBlank {
                     configManager.reverseConnectionUrlOrDefault
                 }
-                val token = sanitizeToken(binding.inputReverseToken.text?.toString())
+                val token = typedReverseToken()
                 binding.inputReverseToken.error = null
                 configManager.reverseConnectionUrl = url
-                configManager.reverseConnectionToken = token
+                token?.let { configManager.reverseConnectionToken = it }
+                updateReconnectAfterRestartUi()
                 intent.action = ReverseConnectionService.ACTION_RECONNECT
                 startForegroundService(intent)
             } else {
@@ -263,6 +382,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                         defaultUrl = configManager.defaultReverseConnectionUrl,
                     )
                 configManager.reverseConnectionUrl = url
+                updateReconnectAfterRestartUi()
                 if (actionId == EditorInfo.IME_ACTION_DONE) binding.inputReverseUrl.clearFocus()
                 if (shouldReconnect) restartServiceIfEnabled()
                 refreshCreditsBalance(force = true)
@@ -274,7 +394,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
 
         binding.inputReverseToken.setOnEditorActionListener { v, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE) {
-                val token = sanitizeToken(v.text?.toString())
+                val token = typedReverseToken() ?: configManager.reverseConnectionToken
                 binding.inputReverseToken.error = null
                 val shouldReconnect =
                     ReverseConnectionSettingsPolicy.shouldReconnectAfterInputPersistence(
@@ -287,11 +407,21 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                     )
                 configManager.reverseConnectionToken = token
                 binding.inputReverseToken.clearFocus()
+                updateReconnectAfterRestartUi()
                 if (shouldReconnect) restartServiceIfEnabled()
                 refreshCreditsBalance(force = true)
                 true
             } else {
                 false
+            }
+        }
+
+        updateReconnectAfterRestartUi()
+        binding.switchReconnectAfterRestart.setOnCheckedChangeListener { _, isChecked ->
+            val result = setReconnectAfterRestart(configManager, isChecked)
+            if (result is ApiResponse.Error) {
+                updateReconnectAfterRestartUi()
+                android.widget.Toast.makeText(this, result.message, android.widget.Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -320,13 +450,13 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                 startActivity(intent)
                 android.widget.Toast.makeText(
                     this,
-                    "Please grant Notification Access to Mobilerun Portal",
+                    getString(R.string.portal_ui_grant_notification_access),
                     android.widget.Toast.LENGTH_LONG
                 ).show()
             } catch (e: Exception) {
                 android.widget.Toast.makeText(
                     this,
-                    "Error opening settings",
+                    getString(R.string.portal_ui_error_opening_settings),
                     android.widget.Toast.LENGTH_SHORT
                 ).show()
             }
@@ -381,7 +511,245 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
             // Revert visual state until onResume confirms change
             binding.switchInstallUnknownApps.isChecked = !binding.switchInstallUnknownApps.isChecked
         }
+
+        binding.switchUnrestrictedBattery.setOnClickListener {
+            // An exemption can only be revoked from the system list.
+            val intent = if (isIgnoringBatteryOptimizations()) {
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            } else {
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            }
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                } catch (_: Exception) {
+                    startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                    )
+                }
+            }
+            // Revert visual state until onResume confirms change
+            binding.switchUnrestrictedBattery.isChecked = !binding.switchUnrestrictedBattery.isChecked
+        }
+
+        binding.switchDeviceAudio.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressDeviceAudioSwitchCallback) return@setOnCheckedChangeListener
+            when {
+                !isChecked -> configManager.deviceAudioEnabled = false
+                hasRecordAudioPermission() -> configManager.deviceAudioEnabled = true
+                // The result turns the flag on, or a denial turns the switch back off.
+                else -> {
+                    AutoAcceptGate.armRecordAudio()
+                    requestRecordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+
+        binding.switchSmsGateway.setOnCheckedChangeListener { _, isChecked ->
+            configManager.smsGatewayEnabled = isChecked
+        }
+        binding.buttonRequestSendSms.setOnClickListener {
+            requestSmsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+        }
+        binding.buttonRequestReadSms.setOnClickListener {
+            requestSmsPermissionLauncher.launch(Manifest.permission.READ_SMS)
+        }
+        binding.buttonRequestReceiveSms.setOnClickListener {
+            requestSmsPermissionLauncher.launch(Manifest.permission.RECEIVE_SMS)
+        }
+        binding.buttonRequestPhoneState.setOnClickListener {
+            requestSmsPermissionLauncher.launch(Manifest.permission.READ_PHONE_STATE)
+        }
+
+        binding.switchSmsCloud.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressSmsCloudSwitchCallback) return@setOnCheckedChangeListener
+            if (isChecked) {
+                // Stays off until the permissions are granted and the watermarks are seeded.
+                setSmsCloudSwitch(false)
+                startSmsCloudEnable()
+            } else {
+                SmsCloud.disable(this)
+                renderSmsCloud()
+            }
+        }
+        binding.buttonSmsCloudSim.setOnClickListener {
+            chooseCloudSim(activeSims()) { subscriptionId ->
+                SmsCloud.chooseSimAsync(this, subscriptionId) { ok ->
+                    if (!ok) {
+                        android.widget.Toast.makeText(this, R.string.sms_cloud_sim_failed, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                    if (!isDestroyed) renderSmsCloud()
+                }
+            }
+        }
+        binding.buttonRequestPhoneNumbers.setOnClickListener {
+            requestPhoneNumbersPermissionLauncher.launch(Manifest.permission.READ_PHONE_NUMBERS)
+        }
     }
+
+    private fun setupLocation() {
+        binding.switchLocationSharing.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressLocationSwitchCallback) return@setOnCheckedChangeListener
+            configManager.locationSharingEnabled = isChecked
+            if (isChecked) requestLocationAccess()
+            renderLocation()
+        }
+        binding.buttonRequestLocation.setOnClickListener { requestLocationAccess() }
+    }
+
+    private fun requestLocationAccess() {
+        val location = AndroidLocationSource(this)
+        when {
+            !location.hasForegroundPermission() -> requestLocationPermissionsLauncher.launch(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            )
+            !location.hasBackgroundPermission() -> requestBackgroundLocation()
+        }
+    }
+
+    private fun openAppDetails() {
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+    }
+
+    /** Asks once per screen; after that App info, since a fixed denial returns without any UI. */
+    private fun requestBackgroundLocation() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (backgroundLocationAsked) {
+            openAppDetails()
+        } else {
+            backgroundLocationAsked = true
+            requestBackgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+    }
+
+    private fun renderLocation() {
+        val enabled = configManager.locationSharingEnabled
+        suppressLocationSwitchCallback = true
+        binding.switchLocationSharing.isChecked = enabled
+        suppressLocationSwitchCallback = false
+        val location = AndroidLocationSource(this)
+        val (status, button) = when {
+            !enabled -> null to null
+            !location.hasForegroundPermission() -> R.string.location_status_off to R.string.location_allow
+            !location.hasBackgroundPermission() ->
+                R.string.location_status_foreground to R.string.location_allow_all_the_time
+            else -> null to null
+        }
+        binding.textLocationStatus.visibility = if (status == null) View.GONE else View.VISIBLE
+        status?.let(binding.textLocationStatus::setText)
+        binding.buttonRequestLocation.visibility = if (button == null) View.GONE else View.VISIBLE
+        button?.let(binding.buttonRequestLocation::setText)
+    }
+
+    private fun startSmsCloudEnable() {
+        if (!SmsSubscriptionResolver(this).hasTelephony()) {
+            android.widget.Toast.makeText(this, R.string.sms_cloud_no_telephony, android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        if (SMS_CLOUD_REQUIRED_PERMISSIONS.all(::isPermissionGranted)) {
+            continueSmsCloudEnable()
+            return
+        }
+        val missing = (SMS_CLOUD_REQUIRED_PERMISSIONS + Manifest.permission.READ_PHONE_NUMBERS)
+            .filterNot(::isPermissionGranted)
+        requestSmsCloudPermissionsLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun continueSmsCloudEnable() {
+        val sims = activeSims()
+        if (sims.size > 1) {
+            chooseCloudSim(sims, ::enableSmsCloud)
+        } else {
+            enableSmsCloud(sims.firstOrNull()?.subscriptionId)
+        }
+    }
+
+    private fun enableSmsCloud(cloudSubscriptionId: Int?) {
+        smsCloudEnabling = true
+        renderSmsCloud()
+        SmsCloud.enableAsync(this, cloudSubscriptionId) { ok ->
+            smsCloudEnabling = false
+            if (!ok) {
+                android.widget.Toast.makeText(this, R.string.sms_cloud_enable_failed, android.widget.Toast.LENGTH_LONG).show()
+            }
+            if (!isDestroyed) renderSmsCloud()
+        }
+    }
+
+    private fun chooseCloudSim(sims: List<SmsSimInfo>, onPicked: (Int) -> Unit) {
+        if (sims.isEmpty()) return
+        val labels = sims.map(::simLabel).toTypedArray()
+        val current = sims.indexOfFirst { it.subscriptionId == configManager.cloudSubscriptionId }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.sms_cloud_sim_dialog_title)
+            .setSingleChoiceItems(labels, current) { dialog, which ->
+                dialog.dismiss()
+                onPicked(sims[which].subscriptionId)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun simLabel(sim: SmsSimInfo): String {
+        val name = sim.displayName?.takeIf { it.isNotBlank() }
+            ?: sim.carrier?.takeIf { it.isNotBlank() }
+            ?: sim.phoneNumber
+            ?: sim.subscriptionId.toString()
+        return getString(R.string.sms_cloud_sim_label, sim.simSlot + 1, name)
+    }
+
+    private fun activeSims(): List<SmsSimInfo> =
+        (SmsSubscriptionResolver(this).bridgeSubscriptions() as? SmsSubscriptionsResult.Available)
+            ?.subscriptions
+            .orEmpty()
+
+    /** The cloud SIM line: shown on multi-SIM devices and whenever cloud SMS is paused for lack of a SIM. */
+    private fun cloudSimStatus(sims: List<SmsSimInfo>): String? {
+        val cloudId = configManager.cloudSubscriptionId
+        val cloud = SmsCloudSims.pick(sims, cloudId)
+        return when {
+            cloud != null -> if (sims.size > 1) getString(R.string.sms_cloud_sim_status, simLabel(cloud)) else null
+            sims.isEmpty() -> getString(R.string.sms_cloud_no_sim)
+            cloudId != null -> getString(R.string.sms_cloud_sim_inactive)
+            else -> getString(R.string.sms_cloud_sim_missing)
+        }
+    }
+
+    private fun setSmsCloudSwitch(checked: Boolean) {
+        suppressSmsCloudSwitchCallback = true
+        binding.switchSmsCloud.isChecked = checked
+        suppressSmsCloudSwitchCallback = false
+    }
+
+    private fun renderSmsCloud() {
+        val enabled = configManager.smsCloudEnabled
+        setSmsCloudSwitch(enabled)
+        binding.switchSmsCloud.isEnabled = !smsCloudEnabling
+        val subscriptions = if (enabled) SmsSubscriptionResolver(this).bridgeSubscriptions() else null
+        val sims = (subscriptions as? SmsSubscriptionsResult.Available)?.subscriptions.orEmpty()
+        val simStatus = if (subscriptions is SmsSubscriptionsResult.Available) cloudSimStatus(sims) else null
+        val lines = mutableListOf<String>()
+        if (enabled) {
+            val missing = SMS_CLOUD_REQUIRED_PERMISSIONS.filterNot(::isPermissionGranted)
+            if (missing.isNotEmpty()) {
+                lines += getString(
+                    R.string.sms_cloud_missing_permissions,
+                    missing.joinToString { it.substringAfterLast('.') },
+                )
+            }
+            simStatus?.let { lines += it }
+        }
+        binding.textSmsCloudStatus.text = lines.joinToString("\n")
+        binding.textSmsCloudStatus.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
+        binding.buttonSmsCloudSim.visibility = if (simStatus != null && sims.isNotEmpty()) View.VISIBLE else View.GONE
+        binding.buttonRequestPhoneNumbers.visibility =
+            if (isPermissionGranted(Manifest.permission.READ_PHONE_NUMBERS)) View.GONE else View.VISIBLE
+    }
+
+    private fun isPermissionGranted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     private fun setupEventFilters() {
         setupEventToggle(binding.switchEventNotification, EventType.NOTIFICATION)
@@ -613,10 +981,13 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                 .setTitle(R.string.portal_ui_reset_to_defaults)
                 .setMessage(R.string.portal_ui_reset_settings_message)
                 .setPositiveButton(R.string.portal_ui_reset) { _, _ ->
+                    val session =
+                        configManager.reverseConnectionToken.takeIf { configManager.cloudSessionActive }
                     val serviceIntent = Intent(this, ReverseConnectionService::class.java).apply {
                         action = ReverseConnectionService.ACTION_DISCONNECT
                     }
                     startService(serviceIntent)
+                    session?.let { DeviceCodeAuthClient().signOut(it) }
 
                     configManager.resetToDefaults()
                     TriggerRepository.getInstance(this).clearAll()
@@ -624,7 +995,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
 
                     android.widget.Toast.makeText(
                         this,
-                        "Settings reset to defaults",
+                        getString(R.string.portal_ui_settings_reset),
                         android.widget.Toast.LENGTH_SHORT,
                     ).show()
 
@@ -655,23 +1026,33 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
 
     private fun persistReverseConnectionInputs() {
         val url = binding.inputReverseUrl.text?.toString()?.trim() ?: ""
-        val token = sanitizeToken(binding.inputReverseToken.text?.toString())
+        val token = typedReverseToken()
         val shouldReconnect =
             ReverseConnectionSettingsPolicy.shouldReconnectAfterInputPersistence(
                 enabled = configManager.reverseConnectionEnabled,
                 currentEffectiveUrl = configManager.reverseConnectionUrlOrDefault,
                 currentToken = configManager.reverseConnectionToken,
                 candidateUrl = url,
-                candidateToken = token,
+                candidateToken = token ?: configManager.reverseConnectionToken,
                 defaultUrl = configManager.defaultReverseConnectionUrl,
             )
         configManager.reverseConnectionUrl = url
-        configManager.reverseConnectionToken = token
+        token?.let { configManager.reverseConnectionToken = it }
+        updateReconnectAfterRestartUi()
         if (shouldReconnect) restartServiceIfEnabled()
     }
 
+    /** Null while a cloud session is kept: the field never shows or re-saves it. */
+    private fun typedReverseToken(): String? {
+        val typed = sanitizeToken(binding.inputReverseToken.text?.toString())
+        return typed.takeUnless { it.isBlank() && configManager.cloudSessionActive }
+    }
+
     private fun currentCreditsToken(): String {
-        return sanitizeToken(binding.inputReverseToken.text?.toString()).trim()
+        typedReverseToken()?.let { return it.trim() }
+        return configManager.reverseConnectionToken
+            .takeIf { configManager.isOfficialCloudUrl(currentCreditsReverseConnectionUrl()) }
+            .orEmpty()
     }
 
     private fun currentCreditsReverseConnectionUrl(): String {
@@ -789,7 +1170,16 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         updateSocketServerPortUi(configManager.socketServerPort)
         updateWebSocketEnabledUi(configManager.websocketEnabled)
         updateWebSocketPortUi(configManager.websocketPort)
+        updateStreamSessionLimitUi(configManager.streamSessionLimit)
         binding.switchKeepScreenAwake.isChecked = configManager.keepScreenAwakeEnabled
+        updateReconnectAfterRestartUi()
+    }
+
+    private fun updateReconnectAfterRestartUi() {
+        val enabled = configManager.reconnectAfterRestartEnabled
+        // Turning it off stays possible after the credentials are gone.
+        binding.switchReconnectAfterRestart.isEnabled = enabled || configManager.hasCloudCredentials
+        binding.switchReconnectAfterRestart.isChecked = enabled
     }
 
     private fun updateSocketServerEnabledUi(enabled: Boolean) {
@@ -820,6 +1210,15 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         }
     }
 
+    private fun updateStreamSessionLimitUi(limit: Int) {
+        val current = binding.inputStreamSessionLimit.text?.toString()
+        val expected = limit.toString()
+        if (current != expected) {
+            binding.inputStreamSessionLimit.setText(expected)
+        }
+        binding.inputStreamSessionLimit.error = null
+    }
+
     private fun updatePermissionSwitches() {
         // Notification Access
         binding.switchNotificationAccess.isChecked = isNotificationServiceEnabled()
@@ -838,6 +1237,61 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
 
         // Install Unknown Apps
         binding.switchInstallUnknownApps.isChecked = packageManager.canRequestPackageInstalls()
+
+        binding.switchUnrestrictedBattery.isChecked = isIgnoringBatteryOptimizations()
+
+        updateDeviceAudioStatus()
+        updateSmsDiagnosticsStatus()
+    }
+
+    // Playback capture needs Android 10+; the switch shows on only while the flag and permission are both set.
+    private fun updateDeviceAudioStatus() {
+        val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        binding.switchDeviceAudio.isEnabled = supported
+        binding.textDeviceAudioDescription.setText(
+            if (supported) R.string.device_audio_description else R.string.device_audio_unsupported,
+        )
+        suppressDeviceAudioSwitchCallback = true
+        binding.switchDeviceAudio.isChecked = supported && configManager.deviceAudioEnabled && hasRecordAudioPermission()
+        suppressDeviceAudioSwitchCallback = false
+    }
+
+    private fun hasRecordAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun isIgnoringBatteryOptimizations(): Boolean =
+        getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName) == true
+
+    private fun updateSmsDiagnosticsStatus() {
+        binding.switchSmsGateway.isChecked = configManager.smsGatewayEnabled
+        val send = grantLabel(Manifest.permission.SEND_SMS)
+        val read = grantLabel(Manifest.permission.READ_SMS)
+        val receive = grantLabel(Manifest.permission.RECEIVE_SMS)
+        val phoneState = grantLabel(Manifest.permission.READ_PHONE_STATE)
+        val phoneNumbers = grantLabel(Manifest.permission.READ_PHONE_NUMBERS)
+        val hasSmsMessaging = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_MESSAGING)
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+        }
+        val telephony = if (hasSmsMessaging) {
+            "available"
+        } else {
+            "not available"
+        }
+        binding.textSmsPermissionsStatus.text =
+            "SMS messaging: $telephony\nSEND_SMS: $send\nREAD_SMS: $read\nRECEIVE_SMS: $receive\nREAD_PHONE_STATE: $phoneState\n" +
+                "READ_PHONE_NUMBERS: $phoneNumbers"
+        renderSmsCloud()
+    }
+
+    private fun grantLabel(permission: String): String {
+        return if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+            "granted"
+        } else {
+            "missing"
+        }
     }
 
     private fun isNotificationServiceEnabled(): Boolean {
@@ -880,8 +1334,43 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
         }
     }
 
+    override fun onSmsGatewayEnabledChanged(enabled: Boolean) {
+        runOnUiThread {
+            binding.switchSmsGateway.isChecked = enabled
+        }
+    }
+
+    override fun onSmsCloudEnabledChanged(enabled: Boolean) {
+        runOnUiThread {
+            renderSmsCloud()
+        }
+    }
+
+    override fun onDeviceAudioEnabledChanged(enabled: Boolean) {
+        runOnUiThread {
+            updateDeviceAudioStatus()
+        }
+    }
+
+    override fun onReconnectAfterRestartEnabledChanged(enabled: Boolean) {
+        runOnUiThread {
+            updateReconnectAfterRestartUi()
+        }
+    }
+
+    override fun onStreamSessionLimitChanged(limit: Int) {
+        runOnUiThread {
+            updateStreamSessionLimitUi(limit)
+        }
+    }
+
     companion object {
         private const val MIN_PORT = 1024
         private const val MAX_PORT = 65535
+        private val SMS_CLOUD_REQUIRED_PERMISSIONS = listOf(
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.READ_PHONE_STATE,
+        )
     }
 }

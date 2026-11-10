@@ -10,6 +10,7 @@ import io.mockk.Runs
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.verify
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,6 +25,8 @@ class ConfigManagerTaskPromptTest {
     private lateinit var sharedStore: MutableMap<String, Any?>
     private lateinit var deviceStore: MutableMap<String, Any?>
     private lateinit var secretsStore: MutableMap<String, Any?>
+    private lateinit var smsStore: MutableMap<String, Any?>
+    private lateinit var audioStore: MutableMap<String, Any?>
 
     @Before
     fun setUp() {
@@ -31,7 +34,9 @@ class ConfigManagerTaskPromptTest {
         sharedStore = mutableMapOf()
         deviceStore = mutableMapOf()
         secretsStore = mutableMapOf()
-        context = mockContext(sharedStore, deviceStore, secretsStore)
+        smsStore = mutableMapOf()
+        audioStore = mutableMapOf()
+        context = mockContext(sharedStore, deviceStore, secretsStore, smsStore, audioStore)
     }
 
     @After
@@ -85,6 +90,45 @@ class ConfigManagerTaskPromptTest {
         val configManager = ConfigManager.getInstance(context)
 
         assertFalse(configManager.keepScreenAwakeEnabled)
+    }
+
+    @Test
+    fun streamSessionLimit_defaultsToThree() {
+        assertEquals(3, ConfigManager.getInstance(context).streamSessionLimit)
+    }
+
+    @Test
+    fun streamSessionLimit_persistsAcrossProcessRestart() {
+        ConfigManager.getInstance(context).streamSessionLimit = 5
+
+        clearSingleton()
+
+        assertEquals(5, ConfigManager.getInstance(context).streamSessionLimit)
+    }
+
+    @Test
+    fun streamSessionLimit_clampsStoredAndAssignedValuesToRange() {
+        val configManager = ConfigManager.getInstance(context)
+
+        sharedStore["stream_session_limit"] = 42
+        assertEquals(5, configManager.streamSessionLimit)
+        sharedStore["stream_session_limit"] = 0
+        assertEquals(1, configManager.streamSessionLimit)
+
+        configManager.streamSessionLimit = 9
+        assertEquals(5, sharedStore["stream_session_limit"])
+    }
+
+    @Test
+    fun setStreamSessionLimitWithNotification_notifiesListenersWithStoredValue() {
+        val configManager = ConfigManager.getInstance(context)
+        val listener = mockk<ConfigManager.ConfigChangeListener>(relaxed = true)
+        configManager.addListener(listener)
+
+        configManager.setStreamSessionLimitWithNotification(2)
+
+        verify(exactly = 1) { listener.onStreamSessionLimitChanged(2) }
+        assertEquals(2, configManager.streamSessionLimit)
     }
 
     @Test
@@ -400,6 +444,96 @@ class ConfigManagerTaskPromptTest {
     }
 
     @Test
+    fun storeCloudSession_marksTheTokenAsASessionOnTheOfficialCloud() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.reverseConnectionUrl = "wss://example.test/v1/providers/personal/join"
+
+        configManager.storeCloudSession("session-token", nowMs = 42L)
+
+        assertTrue(configManager.cloudSessionActive)
+        assertEquals("session-token", configManager.reverseConnectionToken)
+        assertEquals(42L, configManager.cloudSessionCheckedAtMs)
+        assertEquals(configManager.defaultReverseConnectionUrl, configManager.reverseConnectionUrlOrDefault)
+    }
+
+    @Test
+    fun replacingTheTokenEndsTheSessionMarker() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.storeCloudSession("session-token", nowMs = 42L)
+
+        configManager.reverseConnectionToken = "dr_sk_api_key"
+
+        assertFalse(configManager.cloudSessionActive)
+        assertEquals(0L, configManager.cloudSessionCheckedAtMs)
+    }
+
+    @Test
+    fun sessionIsDroppedWhenTheUrlLeavesTheOfficialCloud() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.storeCloudSession("session-token")
+
+        configManager.reverseConnectionUrl = configManager.defaultReverseConnectionUrl
+        assertTrue(configManager.cloudSessionActive)
+
+        configManager.reverseConnectionUrl = "wss://self-hosted.example/v1/providers/personal/join"
+        assertFalse(configManager.cloudSessionActive)
+        assertEquals("", configManager.reverseConnectionToken)
+    }
+
+    @Test
+    fun sessionIsDroppedOnCleartextWs() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.storeCloudSession("session-token")
+
+        configManager.reverseConnectionUrl = "ws://api.mobilerun.ai/v1/providers/personal/join"
+
+        assertFalse(configManager.cloudSessionActive)
+        assertFalse(configManager.isOfficialCloudUrl("ws://api.mobilerun.ai/v1/providers/personal/join"))
+        assertTrue(configManager.isOfficialCloudUrl(configManager.defaultReverseConnectionUrl))
+    }
+
+    @Test
+    fun replacedOrDroppedSessionsAreHandedToTheRevokeHook() {
+        val configManager = ConfigManager.getInstance(context)
+        val revoked = mutableListOf<String>()
+        configManager.onCloudSessionDropped = { revoked += it }
+
+        configManager.storeCloudSession("first")
+        configManager.storeCloudSession("second")
+        configManager.reverseConnectionToken = "dr_sk_api_key"
+        configManager.reverseConnectionToken = "dr_sk_other_key"
+
+        assertEquals(listOf("first", "second"), revoked)
+    }
+
+    @Test
+    fun apiKeysSurviveACustomUrl() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.reverseConnectionToken = "dr_sk_api_key"
+
+        configManager.reverseConnectionUrl = "wss://self-hosted.example/v1/providers/personal/join"
+
+        assertEquals("dr_sk_api_key", configManager.reverseConnectionToken)
+    }
+
+    @Test
+    fun clearCloudSessionIfCurrent_onlyClearsTheCheckedSession() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.storeCloudSession("new-session")
+
+        assertFalse(configManager.clearCloudSessionIfCurrent("old-session"))
+        assertTrue(configManager.cloudSessionActive)
+
+        assertTrue(configManager.clearCloudSessionIfCurrent("new-session"))
+        assertFalse(configManager.cloudSessionActive)
+        assertEquals("", configManager.reverseConnectionToken)
+
+        configManager.reverseConnectionToken = "dr_sk_api_key"
+        assertFalse(configManager.clearCloudSessionIfCurrent("dr_sk_api_key"))
+        assertEquals("dr_sk_api_key", configManager.reverseConnectionToken)
+    }
+
+    @Test
     fun clearCloudCredentials_preservesLocalApiToken() {
         sharedStore["overlay_visible"] = false
         sharedStore["socket_server_enabled"] = true
@@ -408,6 +542,7 @@ class ConfigManagerTaskPromptTest {
         secretsStore["auth_token"] = "auth-123"
         secretsStore["reverse_connection_token"] = "reverse-123"
         secretsStore["reverse_connection_service_key"] = "service-123"
+        secretsStore["reverse_connection_credential_type"] = "session"
         deviceStore["reverse_join_blocked_by_http_402"] = true
 
         ConfigManager.getInstance(context).clearCloudCredentials()
@@ -416,6 +551,7 @@ class ConfigManagerTaskPromptTest {
         assertEquals("auth-123", secretsStore["auth_token"])
         assertFalse(secretsStore.containsKey("reverse_connection_token"))
         assertFalse(secretsStore.containsKey("reverse_connection_service_key"))
+        assertFalse(secretsStore.containsKey("reverse_connection_credential_type"))
         assertEquals(false, sharedStore["overlay_visible"])
         assertEquals(true, sharedStore["socket_server_enabled"])
         assertFalse(sharedStore.containsKey("device_id"))
@@ -431,8 +567,13 @@ class ConfigManagerTaskPromptTest {
         sharedStore["websocket_port"] = 9998
         sharedStore["reverse_connection_enabled"] = true
         sharedStore["production_mode"] = true
+        sharedStore["sms_gateway_enabled"] = true
+        audioStore["device_audio_enabled"] = false
+        audioStore["device_audio_permission_prompted"] = true
         deviceStore["device_id"] = "device-123"
         deviceStore["reverse_join_blocked_by_http_402"] = true
+        deviceStore["reconnect_after_restart_enabled"] = true
+        deviceStore["reverse_connection_was_enabled"] = true
         secretsStore["auth_token"] = "auth-123"
         secretsStore["reverse_connection_token"] = "reverse-123"
         secretsStore["reverse_connection_service_key"] = "service-123"
@@ -451,34 +592,116 @@ class ConfigManagerTaskPromptTest {
         assertFalse(configManager.reverseConnectionEnabled)
         assertFalse(configManager.reverseJoinBlockedByHttp402)
         assertFalse(configManager.productionMode)
+        assertFalse(configManager.smsGatewayEnabled)
+        assertTrue(configManager.deviceAudioEnabled)
+        assertFalse(configManager.deviceAudioPermissionPrompted)
+        assertFalse(configManager.reconnectAfterRestartEnabled)
+        assertFalse(configManager.reverseConnectionWasEnabled)
     }
 
     @Test
-    fun browserAuthPendingWindow_isTimeBoundAndClearable() {
+    fun smsGatewayEnabled_defaultsOffAndPersists() {
+        assertFalse(ConfigManager.getInstance(context).smsGatewayEnabled)
+
+        ConfigManager.getInstance(context).smsGatewayEnabled = true
+        clearSingleton()
+
+        assertTrue(ConfigManager.getInstance(context).smsGatewayEnabled)
+        assertEquals(true, smsStore["sms_gateway_enabled"])
+        assertFalse(sharedStore.containsKey("sms_gateway_enabled"))
+    }
+
+    @Test
+    fun deviceAudioEnabled_defaultsOnAndPersistsOutsideSharedPrefs() {
+        assertTrue(ConfigManager.getInstance(context).deviceAudioEnabled)
+
+        ConfigManager.getInstance(context).deviceAudioEnabled = false
+        clearSingleton()
+
+        assertFalse(ConfigManager.getInstance(context).deviceAudioEnabled)
+        assertEquals(false, audioStore["device_audio_enabled"])
+        assertFalse(sharedStore.containsKey("device_audio_enabled"))
+    }
+
+    @Test
+    fun deviceAudioPermissionPrompted_defaultsOffAndPersistsWithDeviceAudioPrefs() {
+        assertFalse(ConfigManager.getInstance(context).deviceAudioPermissionPrompted)
+
+        ConfigManager.getInstance(context).deviceAudioPermissionPrompted = true
+        clearSingleton()
+
+        assertTrue(ConfigManager.getInstance(context).deviceAudioPermissionPrompted)
+        assertEquals(true, audioStore["device_audio_permission_prompted"])
+        assertFalse(sharedStore.containsKey("device_audio_permission_prompted"))
+    }
+
+    @Test
+    fun reverseConnectionEnabled_startsOffInNewProcessButIsRememberedForRestarts() {
+        ConfigManager.getInstance(context).reverseConnectionEnabled = true
+        clearSingleton()
+
         val configManager = ConfigManager.getInstance(context)
+        assertFalse(configManager.reverseConnectionEnabled)
+        assertTrue(configManager.reverseConnectionWasEnabled)
+        assertEquals(true, deviceStore["reverse_connection_was_enabled"])
 
-        assertFalse(configManager.isBrowserAuthPending(nowMs = 1_000L))
+        configManager.reverseConnectionEnabled = false
+        assertFalse(configManager.reverseConnectionWasEnabled)
+    }
 
-        configManager.markBrowserAuthPending(nowMs = 1_000L, ttlMs = 600_000L)
+    @Test
+    fun clearReverseConnectionWasEnabled_stopsRestartsButKeepsTheRuntimeFlag() {
+        val configManager = ConfigManager.getInstance(context)
+        configManager.reverseConnectionEnabled = true
 
-        assertTrue(configManager.isBrowserAuthPending(nowMs = 600_999L))
-        assertFalse(configManager.isBrowserAuthPending(nowMs = 601_000L))
+        configManager.clearReverseConnectionWasEnabled()
 
-        configManager.markBrowserAuthPending(nowMs = 2_000L, ttlMs = 600_000L)
-        configManager.clearBrowserAuthPending()
+        assertTrue(configManager.reverseConnectionEnabled)
+        assertFalse(configManager.reverseConnectionWasEnabled)
+    }
 
-        assertFalse(configManager.isBrowserAuthPending(nowMs = 2_001L))
+    @Test
+    fun reconnectAfterRestart_defaultsOffPersistsInDevicePrefsAndClearsOnSignOut() {
+        val configManager = ConfigManager.getInstance(context)
+        assertFalse(configManager.reconnectAfterRestartEnabled)
+
+        configManager.reconnectAfterRestartEnabled = true
+        clearSingleton()
+
+        assertTrue(ConfigManager.getInstance(context).reconnectAfterRestartEnabled)
+        assertEquals(true, deviceStore["reconnect_after_restart_enabled"])
+        assertFalse(sharedStore.containsKey("reconnect_after_restart_enabled"))
+
+        ConfigManager.getInstance(context).clearCloudCredentials()
+        assertFalse(ConfigManager.getInstance(context).reconnectAfterRestartEnabled)
+    }
+
+    @Test
+    fun hasCloudCredentials_acceptsTokenOrServiceKey() {
+        val configManager = ConfigManager.getInstance(context)
+        assertFalse(configManager.hasCloudCredentials)
+
+        secretsStore["reverse_connection_service_key"] = "service-key"
+        assertTrue(configManager.hasCloudCredentials)
+
+        secretsStore.remove("reverse_connection_service_key")
+        secretsStore["reverse_connection_token"] = "token"
+        assertTrue(configManager.hasCloudCredentials)
     }
 
     private fun mockContext(
         sharedPrefsStore: MutableMap<String, Any?>,
         devicePrefsStore: MutableMap<String, Any?>,
         secretsPrefsStore: MutableMap<String, Any?>,
+        smsPrefsStore: MutableMap<String, Any?>,
+        audioPrefsStore: MutableMap<String, Any?>,
     ): Context {
         val context = mockk<Context>(relaxed = true)
         val sharedPrefs = mockPreferences(sharedPrefsStore)
         val devicePrefs = mockPreferences(devicePrefsStore)
         val secretsPrefs = mockPreferences(secretsPrefsStore)
+        val smsPrefs = mockPreferences(smsPrefsStore)
+        val audioPrefs = mockPreferences(audioPrefsStore)
 
         every { context.applicationContext } returns context
         every {
@@ -490,6 +713,12 @@ class ConfigManagerTaskPromptTest {
         every {
             context.getSharedPreferences("mobilerun_secrets", Context.MODE_PRIVATE)
         } returns secretsPrefs
+        every {
+            context.getSharedPreferences("mobilerun_sms", Context.MODE_PRIVATE)
+        } returns smsPrefs
+        every {
+            context.getSharedPreferences("mobilerun_audio", Context.MODE_PRIVATE)
+        } returns audioPrefs
 
         return context
     }

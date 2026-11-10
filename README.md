@@ -58,7 +58,14 @@ Mobilerun Portal exposes three local interfaces:
 - WebSocket server (default port 8081)
 - ContentProvider (ADB commands)
 
+While the accessibility service runs an HTTP or WebSocket server, Portal shows a "Portal local server running" notification. To keep the servers reachable in the background, turn on **Unrestricted Battery** in Portal **Settings** → **Permissions**, or over ADB:
+
+```bash
+adb shell dumpsys deviceidle whitelist +com.mobilerun.portal
+```
+
 See [Local API](docs/local-api.md) for full details and examples.
+See [Deep-link inspection](docs/deep-links.md) to discover manifest declarations or check a URI without opening an app.
 See [Triggers and Events](docs/triggers.md) for trigger management methods, event taxonomy, and payload contracts.
 
 ### 📡 WebSocket Events
@@ -73,6 +80,7 @@ See [Triggers and Events](docs/triggers.md) for the complete `EventType` and `Tr
 Enable reverse connection to let the device initiate an outbound WebSocket connection to a host (used by Mobilerun Cloud).
 
 See [Reverse Connection](docs/reverse-connection.md) for configuration details and the streaming protocol.
+Saved credentials survive a reboot. To reconnect automatically after a reboot or app update, turn on **Settings > Reconnect After Restart** (off by default).
 Trigger JSON-RPC methods are documented in [Triggers and Events](docs/triggers.md).
 The operator-facing screen-awake watchdog can also be enabled from **Settings** with **Keep Screen Awake**, or over WebSocket with `screen/keepAwake/set` and `screen/keepAwake/status`.
 
@@ -109,6 +117,8 @@ adb shell content insert --uri content://com.mobilerun.portal/set_no_a11y_mode -
 | Keyboard/overlay/config actions | Yes | Yes | Yes | Yes when Accessibility is ready |
 | Clipboard get/set | Yes | Yes | Yes | Yes when Mobilerun Keyboard is available |
 | Screenshot | No direct endpoint | Yes | Yes | Yes when Accessibility is ready |
+| Deep-link discovery / resolution | Query | POST | Yes | Yes, including headless mode |
+| SMS (`sms/*`) | Query + `sms/send` insert | POST | Yes | Yes, including headless mode |
 | APK install | No | No | Yes | Yes |
 | WebRTC streaming + signaling | No | No | No | Yes |
 | `files/*` | No | Yes on Android 11+ | Yes on Android 11+ | Yes on Android 11+ |
@@ -160,6 +170,12 @@ adb shell content query --uri content://com.mobilerun.portal/clipboard/get
 
 # Get keep-screen-awake watchdog status
 adb shell content query --uri content://com.mobilerun.portal/screen_keep_awake_status
+
+# Get the max number of concurrent stream viewers (limit, min, max)
+adb shell content query --uri content://com.mobilerun.portal/stream_session_limit
+
+# Get the reconnect-after-restart setting
+adb shell content query --uri content://com.mobilerun.portal/cloud/reconnect_after_restart
 ```
 
 #### Insert Commands (Actions & Configuration)
@@ -199,6 +215,10 @@ adb shell content insert --uri content://com.mobilerun.portal/toggle_socket_serv
 adb shell content insert --uri content://com.mobilerun.portal/toggle_websocket_server --bind enabled:b:true --bind port:i:8081
 adb shell content insert --uri content://com.mobilerun.portal/toggle_websocket_server --bind enabled:b:false
 
+# Enable/disable the SMS gateway (default: off)
+adb shell content insert --uri content://com.mobilerun.portal/sms/gateway --bind enabled:b:true
+adb shell content insert --uri content://com.mobilerun.portal/sms/gateway --bind enabled:b:false
+
 # Enable/disable explicit no-accessibility local server mode
 adb shell content insert --uri content://com.mobilerun.portal/set_no_a11y_mode --bind enabled:b:true
 adb shell content insert --uri content://com.mobilerun.portal/set_no_a11y_mode --bind enabled:b:false
@@ -207,12 +227,20 @@ adb shell content insert --uri content://com.mobilerun.portal/set_no_a11y_mode -
 adb shell content insert --uri content://com.mobilerun.portal/toggle_screen_keep_awake --bind enabled:b:true
 adb shell content insert --uri content://com.mobilerun.portal/toggle_screen_keep_awake --bind enabled:b:false
 
+# Set the max number of concurrent stream viewers, the main stream included (1-5, default: 3).
+# Applies to new viewers; viewers already connected keep streaming.
+adb shell content insert --uri content://com.mobilerun.portal/stream_session_limit --bind limit:i:4
+
 # Configure reverse connection (host URL + optional token/service key)
 adb shell content insert --uri content://com.mobilerun.portal/configure_reverse_connection --bind url_base64:s:"d3NzOi8vYXBpLm1vYmlsZXJ1bi5haS92MS9wcm92aWRlcnMvcGVyc29uYWwvam9pbg==" --bind token_base64:s:"WU9VUl9UT0tFTg==" --bind enabled:b:true
 adb shell content insert --uri content://com.mobilerun.portal/configure_reverse_connection --bind service_key_base64:s:"WU9VUl9LRVk="
 
 # Toggle production mode UI
 adb shell content insert --uri content://com.mobilerun.portal/toggle_production_mode --bind enabled:b:true
+
+# Reconnect to the cloud after a reboot or app update (default: off; needs saved cloud credentials)
+adb shell content insert --uri content://com.mobilerun.portal/cloud/reconnect_after_restart --bind enabled:b:true
+adb shell content insert --uri content://com.mobilerun.portal/cloud/reconnect_after_restart --bind enabled:b:false
 ```
 
 #### Common Key Codes

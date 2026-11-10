@@ -8,10 +8,21 @@ Mobilerun Portal can initiate an outbound WebSocket connection to a host (used b
 2. Under **Reverse Connection**, enter the host URL (ws/wss).
 3. Optional: enter a token (sent as a Bearer token).
 4. Toggle **Connect to Host**.
+5. Optional: turn on **Reconnect After Restart** to reconnect after a reboot or app update.
+
+## Restarts
+
+Saved credentials survive a reboot or app update. The connection comes back only when **Reconnect After Restart** is on and the connection was on before the restart; otherwise the main page offers **Reconnect**.
+
+- Off by default. Enabling it requires saved cloud credentials.
+- Sign Out and Reset to Defaults turn it off.
 
 ## Alternative method (Simplest)
 
-Press Connect to Mobilerun button in portal main page.
+Tap **Sign In** on the Portal main page. Scan the QR code with another device, or tap **Open on This Phone**, and approve the device on Mobilerun. Portal connects once the code is approved.
+
+The sign-in is a Mobilerun session for this device. Portal refreshes it while connected; **Sign Out** revokes it. When the session ends, Portal asks to sign in again at its next reconnect.
+
 ---
 
 Mobilerun default host URL:
@@ -51,6 +62,13 @@ Live device events are sent separately as JSON-RPC-style notifications with no `
 [WebSocket Events](websocket-events.md) and [Triggers and Events](triggers.md) for the event
 contract.
 
+## Device info
+
+These read methods work without the accessibility service:
+
+- `timezone/get` returns `{timezone}` (IANA id).
+- `location/get` returns `{latitude, longitude}`. It needs **Share location with Mobilerun cloud** on in Portal Settings and location allowed all the time; otherwise it returns an error.
+
 ## Trigger Management
 
 Reverse connection supports the same trigger JSON-RPC methods as the local WebSocket API:
@@ -68,6 +86,32 @@ Reverse connection supports the same trigger JSON-RPC methods as the local WebSo
 - `triggers/runs/clear`
 
 These `triggers/*` methods are headless-safe and remain available even if the Accessibility Service is disconnected. See [Triggers and Events](triggers.md) for exact params, `TriggerJson` payload shape, and ADB equivalents.
+
+## SMS Gateway
+
+Reverse connection supports the same `sms/*` JSON-RPC methods as local WebSocket:
+
+- `sms/capabilities`
+- `sms/send`
+- `sms/status`
+- `sms/messages/list`
+- `sms/messages/get`
+
+These methods remain available even if the Accessibility Service is disconnected. Except for `sms/capabilities`, they return an error until the SMS gateway is enabled on the device (see [Local API](local-api.md)). `sms/send` requires `SEND_SMS`. Stored message reads require `READ_SMS`. SIM slot lookup and active subscription metadata require `READ_PHONE_STATE`.
+
+Example:
+
+```json
+{
+  "id": "sms-1",
+  "method": "sms/send",
+  "params": {
+    "phone_number": "+15550001111",
+    "message": "hello",
+    "delivery_report": true
+  }
+}
+```
 
 ## Device Events
 
@@ -103,7 +147,11 @@ Reverse connection supports the same app commands as local WebSocket:
 
 - `app` with optional `stopBeforeLaunch` (default `false`)
 - `app/deep-link` with required `deepLink`, optional `package`, optional `action`, and `displayId` (default `0`)
+- `app/deep-links` with required `package`, to inspect installed manifest declarations (headless-safe)
+- `app/deep-link/resolve` with required `package` and `deepLink`, plus optional `action`, to check Android resolver matches (headless-safe)
 - `app/stop` to request a best-effort stop
+
+See [Deep-link inspection](deep-links.md).
 
 Example:
 
@@ -194,13 +242,17 @@ honored exactly.
 ### Streaming notes
 
 - On Android 13+, notification permission is required to show the background streaming prompt.
-- **Auto-accept Screen Share** in Settings can click the MediaProjection dialog automatically.
+- **Auto-accept Screen Share** in Settings can click the MediaProjection dialog and Portal's own Record audio prompt automatically: **While using the app** on Android 11+, **Allow** on Android 10.
 - `stream/start` may return `prompting_user` or `waiting_for_user_notification_tap` while waiting for permission.
+- If the offer has an audio m-line (`recvonly` or `sendrecv`), the Portal answers it with the phone's media audio (Opus, `sendonly`) on Android 10+ when the **Device Audio** switch in Settings is on (the default); otherwise, and for offers without audio, the stream is video-only. Audio stays silent until Record audio is granted, then starts within about 2 seconds without a reconnect.
+- With **Device Audio** on and Record audio not granted, Portal asks for it once, right after the screen-share consent of the first stream that needs one. Headless: `adb shell pm grant com.mobilerun.portal android.permission.RECORD_AUDIO`; turn it off with `adb shell content insert --uri content://com.mobilerun.portal/device_audio --bind enabled:b:false`; `content query` on the same URI returns `enabled`, `permissionGranted` and `supported`.
+- Media and game audio is streamed. Calls, notifications, ringtones, alarms, system sounds and apps that block capture stay silent.
 
 ## Configure via ContentProvider (optional)
 
 ```bash
 adb shell content insert --uri content://com.mobilerun.portal/configure_reverse_connection --bind url_base64:s:"d3NzOi8vYXBpLm1vYmlsZXJ1bi5haS92MS9wcm92aWRlcnMvcGVyc29uYWwvam9pbg==" --bind token_base64:s:"WU9VUl9UT0tFTg==" --bind enabled:b:true
+adb shell content insert --uri content://com.mobilerun.portal/cloud/reconnect_after_restart --bind enabled:b:true
 ```
 
 The `check_event_streams.py` smoke script uses the same base64-backed provider fields under

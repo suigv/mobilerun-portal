@@ -19,7 +19,7 @@ android {
 
         val updateFeedUrl =
             (project.findProperty("updateFeedUrl") as String?)
-                ?: "https://github.com/droidrun/mobilerun-portal/releases/latest/download/latest.json"
+                ?: "https://github.com/suigv/mobilerun-portal/releases/latest/download/latest.json"
         buildConfigField(
             "String",
             "UPDATE_FEED_URL",
@@ -70,6 +70,7 @@ dependencies {
     implementation(libs.java.websocket)
     implementation(libs.webrtc)
     implementation(libs.okhttp)
+    implementation(libs.zxing.core)
     testImplementation(libs.junit)
     testImplementation(libs.json)
     testImplementation(libs.mockk)

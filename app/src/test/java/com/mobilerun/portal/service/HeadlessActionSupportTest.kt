@@ -24,9 +24,18 @@ class HeadlessActionSupportTest {
         assertTrue(HeadlessActionSupport.isAllowed("webrtc/keepAlive"))
         assertTrue(HeadlessActionSupport.isAllowed("screen/keepAwake/set"))
         assertTrue(HeadlessActionSupport.isAllowed("screen/keepAwake/status"))
+        assertTrue(HeadlessActionSupport.isAllowed("cloud/reconnectAfterRestart/status"))
+        assertTrue(HeadlessActionSupport.isAllowed("version"))
+        assertTrue(HeadlessActionSupport.isAllowed("timezone/get"))
+        assertTrue(HeadlessActionSupport.isAllowed("location/get"))
         assertTrue(HeadlessActionSupport.isAllowed("clipboard/get"))
         assertTrue(HeadlessActionSupport.isAllowed("clipboard/set"))
         assertTrue(HeadlessActionSupport.isAllowed("triggers/status"))
+        assertTrue(HeadlessActionSupport.isAllowed("app/deep-links"))
+        assertTrue(HeadlessActionSupport.isAllowed("app/deep-link/resolve"))
+        assertTrue(HeadlessActionSupport.isAllowed("sms/capabilities"))
+        assertTrue(HeadlessActionSupport.isAllowed("sms/send"))
+        assertTrue(HeadlessActionSupport.isAllowed("sms/messages/list"))
     }
 
     @Test

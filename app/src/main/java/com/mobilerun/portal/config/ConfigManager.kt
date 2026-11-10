@@ -27,6 +27,8 @@ class ConfigManager private constructor(private val context: Context) {
         private const val PREFS_NAME = "mobilerun_config"
         private const val DEVICE_PREFS_NAME = "mobilerun_device"
         private const val SECRET_PREFS_NAME = "mobilerun_secrets"
+        private const val SMS_PREFS_NAME = "mobilerun_sms"
+        private const val AUDIO_PREFS_NAME = "mobilerun_audio"
         private const val KEY_OVERLAY_VISIBLE = "overlay_visible"
         private const val KEY_OVERLAY_OFFSET = "overlay_offset"
         private const val KEY_AUTO_OFFSET_ENABLED = "auto_offset_enabled"
@@ -37,18 +39,30 @@ class ConfigManager private constructor(private val context: Context) {
         // WebSocket & Events
         private const val KEY_WEBSOCKET_ENABLED = "websocket_enabled"
         private const val KEY_WEBSOCKET_PORT = "websocket_port"
+        private const val KEY_STREAM_SESSION_LIMIT = "stream_session_limit"
         private const val KEY_REVERSE_CONNECTION_URL = "reverse_connection_url"
         private const val KEY_REVERSE_CONNECTION_TOKEN = "reverse_connection_token"
         private const val KEY_REVERSE_CONNECTION_ENABLED = "reverse_connection_enabled"
         private const val KEY_REVERSE_CONNECTION_SERVICE_KEY = "reverse_connection_service_key"
+        private const val KEY_REVERSE_CONNECTION_CREDENTIAL_TYPE = "reverse_connection_credential_type"
+        private const val KEY_CLOUD_SESSION_CHECKED_AT_MS = "cloud_session_checked_at_ms"
+        private const val CREDENTIAL_SESSION = "session"
         private const val KEY_REVERSE_JOIN_BLOCKED_BY_HTTP_402 =
             "reverse_join_blocked_by_http_402"
         private const val KEY_REVERSE_JOIN_DISCONNECTED_WHILE_HTTP_402_BLOCKED =
             "reverse_join_disconnected_while_http_402_blocked"
+        private const val KEY_REVERSE_CONNECTION_WAS_ENABLED = "reverse_connection_was_enabled"
+        private const val KEY_RECONNECT_AFTER_RESTART_ENABLED = "reconnect_after_restart_enabled"
         private const val KEY_PRODUCTION_MODE = "production_mode"
         private const val KEY_DEV_MODE_ENABLED = "dev_mode_enabled"
         private const val KEY_INSTALL_AUTO_ACCEPT_ENABLED = "install_auto_accept_enabled"
         private const val KEY_KEEP_SCREEN_AWAKE_ENABLED = "keep_screen_awake_enabled"
+        private const val KEY_SMS_GATEWAY_ENABLED = "sms_gateway_enabled"
+        private const val KEY_SMS_CLOUD_ENABLED = "sms_cloud_enabled"
+        private const val KEY_LOCATION_SHARING_ENABLED = "location_sharing_enabled"
+        private const val KEY_SMS_CLOUD_SUBSCRIPTION_ID = "sms_cloud_subscription_id"
+        private const val KEY_DEVICE_AUDIO_ENABLED = "device_audio_enabled"
+        private const val KEY_DEVICE_AUDIO_PERMISSION_PROMPTED = "device_audio_permission_prompted"
         private const val KEY_KEEP_ALIVE_LAST_RECOVERY_AT_MS = "keep_alive_last_recovery_at_ms"
         private const val KEY_KEEP_ALIVE_LAST_RECOVERY_ATTEMPT_AT_MS =
             "keep_alive_last_recovery_attempt_at_ms"
@@ -94,12 +108,14 @@ class ConfigManager private constructor(private val context: Context) {
         private const val PREFIX_EVENT_ENABLED = "event_enabled_"
         private const val KEY_AUTH_TOKEN = "auth_token"
         private const val KEY_DEVICE_ID = "device_id"
-        private const val KEY_BROWSER_AUTH_PENDING_UNTIL_MS = "browser_auth_pending_until_ms"
         private const val DEVICE_ID_PLACEHOLDER = "{deviceId}"
 
         private const val DEFAULT_OFFSET = 0
         private const val DEFAULT_SOCKET_PORT = 8080
         private const val DEFAULT_WEBSOCKET_PORT = 8081
+        const val DEFAULT_STREAM_SESSION_LIMIT = 3
+        const val MIN_STREAM_SESSION_LIMIT = 1
+        const val MAX_STREAM_SESSION_LIMIT = 5
         private const val DEFAULT_REVERSE_CONNECTION_URL =
             "wss://api.mobilerun.ai/v1/providers/personal/join"
 
@@ -124,6 +140,14 @@ class ConfigManager private constructor(private val context: Context) {
 
     private val secretsPrefs: SharedPreferences =
         context.getSharedPreferences(SECRET_PREFS_NAME, Context.MODE_PRIVATE)
+
+    // Excluded from backup and device transfer, so a restore never re-enables the SMS gateway.
+    private val smsPrefs: SharedPreferences =
+        context.getSharedPreferences(SMS_PREFS_NAME, Context.MODE_PRIVATE)
+
+    // Excluded from backup and device transfer, so a restore never re-enables device audio.
+    private val audioPrefs: SharedPreferences =
+        context.getSharedPreferences(AUDIO_PREFS_NAME, Context.MODE_PRIVATE)
 
     init {
         migrateSecretPrefsIfNeeded()
@@ -226,6 +250,19 @@ class ConfigManager private constructor(private val context: Context) {
             sharedPrefs.edit { putInt(KEY_WEBSOCKET_PORT, value) }
         }
 
+    // Max concurrent WebRTC stream sessions, the primary stream included
+    var streamSessionLimit: Int
+        get() = sharedPrefs.getInt(KEY_STREAM_SESSION_LIMIT, DEFAULT_STREAM_SESSION_LIMIT)
+            .coerceIn(MIN_STREAM_SESSION_LIMIT, MAX_STREAM_SESSION_LIMIT)
+        set(value) {
+            sharedPrefs.edit {
+                putInt(
+                    KEY_STREAM_SESSION_LIMIT,
+                    value.coerceIn(MIN_STREAM_SESSION_LIMIT, MAX_STREAM_SESSION_LIMIT),
+                )
+            }
+        }
+
     // Reverse Connection URL
     var reverseConnectionUrl: String
         get() {
@@ -242,6 +279,10 @@ class ConfigManager private constructor(private val context: Context) {
             sharedPrefs.edit { putString(KEY_REVERSE_CONNECTION_URL, value) }
             if (newEffectiveUrl != currentEffectiveUrl) {
                 reverseJoinBlockedByHttp402 = false
+            }
+            // A cloud session is account-wide; never keep it for another host.
+            if (cloudSessionActive && !isOfficialCloudUrl(reverseConnectionUrlOrDefault)) {
+                reverseConnectionToken = ""
             }
         }
 
@@ -265,6 +306,7 @@ class ConfigManager private constructor(private val context: Context) {
         set(value) {
             val normalizedValue = CloudTokenNormalizer.normalize(value).orEmpty()
             val changed = normalizedValue != reverseConnectionToken
+            val droppedSession = reverseConnectionToken.takeIf { changed && cloudSessionActive }
             secretsPrefs.edit {
                 putString(
                     KEY_REVERSE_CONNECTION_TOKEN,
@@ -273,8 +315,49 @@ class ConfigManager private constructor(private val context: Context) {
             }
             if (changed) {
                 reverseJoinBlockedByHttp402 = false
+                secretsPrefs.edit {
+                    remove(KEY_REVERSE_CONNECTION_CREDENTIAL_TYPE)
+                    remove(KEY_CLOUD_SESSION_CHECKED_AT_MS)
+                }
             }
+            droppedSession?.let { onCloudSessionDropped?.invoke(it) }
         }
+
+    /** Revokes a session on the server when another credential replaces it. */
+    @Volatile
+    var onCloudSessionDropped: ((String) -> Unit)? = null
+
+    /** True when the saved token is a device sign-in session rather than an API key. */
+    val cloudSessionActive: Boolean
+        get() = secretsPrefs.getString(KEY_REVERSE_CONNECTION_CREDENTIAL_TYPE, null) ==
+            CREDENTIAL_SESSION && reverseConnectionToken.isNotBlank()
+
+    var cloudSessionCheckedAtMs: Long
+        get() = secretsPrefs.getLong(KEY_CLOUD_SESSION_CHECKED_AT_MS, 0L)
+        set(value) {
+            secretsPrefs.edit { putLong(KEY_CLOUD_SESSION_CHECKED_AT_MS, value) }
+        }
+
+    fun storeCloudSession(token: String, nowMs: Long = System.currentTimeMillis()) {
+        reverseConnectionUrl = DEFAULT_REVERSE_CONNECTION_URL
+        reverseConnectionToken = token
+        secretsPrefs.edit {
+            putString(KEY_REVERSE_CONNECTION_CREDENTIAL_TYPE, CREDENTIAL_SESSION)
+            putLong(KEY_CLOUD_SESSION_CHECKED_AT_MS, nowMs)
+        }
+    }
+
+    /** Clears the session only if it is still the one the caller checked. */
+    fun clearCloudSessionIfCurrent(token: String): Boolean = synchronized(this) {
+        if (!cloudSessionActive || reverseConnectionToken != token) return false
+        reverseConnectionToken = ""
+        true
+    }
+
+    /** A session only goes to the official cloud, and only over TLS. */
+    fun isOfficialCloudUrl(url: String): Boolean =
+        url.trim().startsWith("wss://", ignoreCase = true) &&
+            PortalCloudClient.isOfficialMobilerunCloudConnection(url, DEFAULT_REVERSE_CONNECTION_URL)
 
     // Reverse Connection Service Key (Header: X-Remote-Device-Key)
     var reverseConnectionServiceKey: String
@@ -342,7 +425,37 @@ class ConfigManager private constructor(private val context: Context) {
             return locale.country.ifBlank { "US" }
         }
 
-    var reverseConnectionEnabled: Boolean = false
+    @Volatile
+    private var reverseConnectionEnabledInProcess = false
+
+    /** Runtime on/off for the cloud connection; the last value is also kept for restarts. */
+    var reverseConnectionEnabled: Boolean
+        get() = reverseConnectionEnabledInProcess
+        set(value) {
+            reverseConnectionEnabledInProcess = value
+            devicePrefs.edit { putBoolean(KEY_REVERSE_CONNECTION_WAS_ENABLED, value) }
+        }
+
+    /** Stops restarts from resuming the connection without changing the runtime flag. */
+    fun clearReverseConnectionWasEnabled() {
+        devicePrefs.edit { putBoolean(KEY_REVERSE_CONNECTION_WAS_ENABLED, false) }
+    }
+
+    /** Whether the cloud connection was left on before the process last died. */
+    val reverseConnectionWasEnabled: Boolean
+        get() = devicePrefs.getBoolean(KEY_REVERSE_CONNECTION_WAS_ENABLED, false)
+
+    // Device prefs: never restored from backup, cleared on sign-out and reset.
+    var reconnectAfterRestartEnabled: Boolean
+        get() = devicePrefs.getBoolean(KEY_RECONNECT_AFTER_RESTART_ENABLED, false)
+        set(value) {
+            if (reconnectAfterRestartEnabled == value) return
+            devicePrefs.edit { putBoolean(KEY_RECONNECT_AFTER_RESTART_ENABLED, value) }
+            listeners.forEach { it.onReconnectAfterRestartEnabledChanged(value) }
+        }
+
+    val hasCloudCredentials: Boolean
+        get() = reverseConnectionToken.isNotBlank() || reverseConnectionServiceKey.isNotBlank()
 
     /**
      * Stored with the device identity so the block survives process restarts but is excluded from
@@ -396,34 +509,11 @@ class ConfigManager private constructor(private val context: Context) {
         )
     }
 
-    var forceLoginOnNextConnect: Boolean
-        get() = sharedPrefs.getBoolean("force_login_on_next_connect", false)
-        set(value) {
-            sharedPrefs.edit { putBoolean("force_login_on_next_connect", value) }
-        }
-
     var screenShareAutoAcceptEnabled: Boolean
         get() = sharedPrefs.getBoolean("screen_share_auto_accept_enabled", true)
         set(value) {
             sharedPrefs.edit { putBoolean("screen_share_auto_accept_enabled", value) }
         }
-
-    fun markBrowserAuthPending(
-        nowMs: Long = System.currentTimeMillis(),
-        ttlMs: Long = 10 * 60 * 1000L,
-    ) {
-        sharedPrefs.edit {
-            putLong(KEY_BROWSER_AUTH_PENDING_UNTIL_MS, nowMs + ttlMs.coerceAtLeast(0L))
-        }
-    }
-
-    fun isBrowserAuthPending(nowMs: Long = System.currentTimeMillis()): Boolean {
-        return sharedPrefs.getLong(KEY_BROWSER_AUTH_PENDING_UNTIL_MS, 0L) > nowMs
-    }
-
-    fun clearBrowserAuthPending() {
-        sharedPrefs.edit { remove(KEY_BROWSER_AUTH_PENDING_UNTIL_MS) }
-    }
 
     var installAutoAcceptEnabled: Boolean
         get() = sharedPrefs.getBoolean(KEY_INSTALL_AUTO_ACCEPT_ENABLED, false)
@@ -435,6 +525,67 @@ class ConfigManager private constructor(private val context: Context) {
         get() = sharedPrefs.getBoolean(KEY_KEEP_SCREEN_AWAKE_ENABLED, false)
         set(value) {
             sharedPrefs.edit { putBoolean(KEY_KEEP_SCREEN_AWAKE_ENABLED, value) }
+        }
+
+    // Set only from Settings and the ContentProvider, never over HTTP, WebSocket or reverse.
+    var smsGatewayEnabled: Boolean
+        get() = smsPrefs.getBoolean(KEY_SMS_GATEWAY_ENABLED, false)
+        set(value) {
+            if (smsGatewayEnabled == value) return
+            smsPrefs.edit { putBoolean(KEY_SMS_GATEWAY_ENABLED, value) }
+            listeners.forEach { it.onSmsGatewayEnabledChanged(value) }
+        }
+
+    /**
+     * Location consent for `location/get`. Set only from Settings; install-time grants don't count.
+     * Kept in device prefs, which are never restored from backup.
+     */
+    var locationSharingEnabled: Boolean
+        get() = devicePrefs.getBoolean(KEY_LOCATION_SHARING_ENABLED, false)
+        set(value) {
+            devicePrefs.edit { putBoolean(KEY_LOCATION_SHARING_ENABLED, value) }
+        }
+
+    // Mobilerun cloud SMS consent. Set only from Settings; never derived from smsGatewayEnabled.
+    var smsCloudEnabled: Boolean
+        get() = smsPrefs.getBoolean(KEY_SMS_CLOUD_ENABLED, false)
+        set(value) {
+            if (smsCloudEnabled == value) return
+            smsPrefs.edit(commit = true) { putBoolean(KEY_SMS_CLOUD_ENABLED, value) }
+            listeners.forEach { it.onSmsCloudEnabledChanged(value) }
+        }
+
+    /** The SIM Mobilerun cloud SMS covers; required on multi-SIM devices. */
+    var cloudSubscriptionId: Int?
+        get() = if (smsPrefs.contains(KEY_SMS_CLOUD_SUBSCRIPTION_ID)) {
+            smsPrefs.getInt(KEY_SMS_CLOUD_SUBSCRIPTION_ID, -1)
+        } else {
+            null
+        }
+        set(value) {
+            smsPrefs.edit(commit = true) {
+                if (value == null) remove(KEY_SMS_CLOUD_SUBSCRIPTION_ID) else putInt(KEY_SMS_CLOUD_SUBSCRIPTION_ID, value)
+            }
+        }
+
+    /** Runs after a settings reset so SMS records older than 24 h are dropped (set by PortalApplication). */
+    @Volatile
+    var onSmsReset: (() -> Unit)? = null
+
+    // Set only from Settings and the ContentProvider; streaming also needs RECORD_AUDIO.
+    var deviceAudioEnabled: Boolean
+        get() = audioPrefs.getBoolean(KEY_DEVICE_AUDIO_ENABLED, true)
+        set(value) {
+            if (deviceAudioEnabled == value) return
+            audioPrefs.edit { putBoolean(KEY_DEVICE_AUDIO_ENABLED, value) }
+            listeners.forEach { it.onDeviceAudioEnabledChanged(value) }
+        }
+
+    // Set once Portal has asked for RECORD_AUDIO on its own; the Settings switch can still ask.
+    var deviceAudioPermissionPrompted: Boolean
+        get() = audioPrefs.getBoolean(KEY_DEVICE_AUDIO_PERMISSION_PROMPTED, false)
+        set(value) {
+            audioPrefs.edit { putBoolean(KEY_DEVICE_AUDIO_PERMISSION_PROMPTED, value) }
         }
 
     var keepAliveLastRecoveryAtMs: Long
@@ -795,6 +946,11 @@ class ConfigManager private constructor(private val context: Context) {
         fun onWebSocketEnabledChanged(enabled: Boolean) {}
         fun onWebSocketPortChanged(port: Int) {}
         fun onKeepScreenAwakeEnabledChanged(enabled: Boolean) {}
+        fun onSmsGatewayEnabledChanged(enabled: Boolean) {}
+        fun onSmsCloudEnabledChanged(enabled: Boolean) {}
+        fun onDeviceAudioEnabledChanged(enabled: Boolean) {}
+        fun onReconnectAfterRestartEnabledChanged(enabled: Boolean) {}
+        fun onStreamSessionLimitChanged(limit: Int) {}
 
         fun onProductionModeChanged(enabled: Boolean) {}
     }
@@ -857,6 +1013,12 @@ class ConfigManager private constructor(private val context: Context) {
     fun setWebSocketPortWithNotification(port: Int) {
         websocketPort = port
         listeners.forEach { it.onWebSocketPortChanged(port) }
+    }
+
+    fun setStreamSessionLimitWithNotification(limit: Int) {
+        val clamped = limit.coerceIn(MIN_STREAM_SESSION_LIMIT, MAX_STREAM_SESSION_LIMIT)
+        streamSessionLimit = clamped
+        listeners.forEach { it.onStreamSessionLimitChanged(clamped) }
     }
 
     fun setKeepScreenAwakeEnabledWithNotification(enabled: Boolean) {
@@ -962,6 +1124,8 @@ class ConfigManager private constructor(private val context: Context) {
         secretsPrefs.edit(commit = true) {
             remove(KEY_REVERSE_CONNECTION_TOKEN)
             remove(KEY_REVERSE_CONNECTION_SERVICE_KEY)
+            remove(KEY_REVERSE_CONNECTION_CREDENTIAL_TYPE)
+            remove(KEY_CLOUD_SESSION_CHECKED_AT_MS)
         }
         sharedPrefs.edit(commit = true) {
             remove(KEY_DEVICE_ID)
@@ -988,6 +1152,7 @@ class ConfigManager private constructor(private val context: Context) {
             putInt(KEY_SOCKET_SERVER_PORT, DEFAULT_SOCKET_PORT)
             putBoolean(KEY_WEBSOCKET_ENABLED, false)
             putInt(KEY_WEBSOCKET_PORT, DEFAULT_WEBSOCKET_PORT)
+            putInt(KEY_STREAM_SESSION_LIMIT, DEFAULT_STREAM_SESSION_LIMIT)
             putString(KEY_REVERSE_CONNECTION_URL, DEFAULT_REVERSE_CONNECTION_URL)
             putString(KEY_REVERSE_CONNECTION_TOKEN, "")
             putBoolean(KEY_REVERSE_CONNECTION_ENABLED, false)
@@ -997,8 +1162,10 @@ class ConfigManager private constructor(private val context: Context) {
             putBoolean(KEY_INSTALL_AUTO_ACCEPT_ENABLED, false)
             putBoolean(KEY_KEEP_SCREEN_AWAKE_ENABLED, false)
             putBoolean("screen_share_auto_accept_enabled", true)
-            putBoolean("force_login_on_next_connect", false)
         }
+        smsPrefs.edit(commit = true) { clear() }
+        audioPrefs.edit(commit = true) { clear() }
+        onSmsReset?.invoke()
         // Notify listeners
         listeners.forEach {
             it.onOverlayVisibilityChanged(false)
@@ -1008,6 +1175,11 @@ class ConfigManager private constructor(private val context: Context) {
             it.onWebSocketEnabledChanged(false)
             it.onWebSocketPortChanged(DEFAULT_WEBSOCKET_PORT)
             it.onKeepScreenAwakeEnabledChanged(false)
+            it.onSmsGatewayEnabledChanged(false)
+            it.onSmsCloudEnabledChanged(false)
+            it.onDeviceAudioEnabledChanged(true)
+            it.onReconnectAfterRestartEnabledChanged(false)
+            it.onStreamSessionLimitChanged(DEFAULT_STREAM_SESSION_LIMIT)
             it.onProductionModeChanged(false)
         }
     }

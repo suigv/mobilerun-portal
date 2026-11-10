@@ -5,6 +5,7 @@ import com.mobilerun.portal.api.ApiHandler
 import com.mobilerun.portal.api.ApiResponse
 import com.mobilerun.portal.triggers.TriggerApi
 import com.mobilerun.portal.triggers.TriggerApiResult
+import io.mockk.confirmVerified
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -18,6 +19,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActionDispatcherTest {
+    @Test
+    fun dispatch_timezoneAndLocationGet_routeToApiHandler() {
+        val apiHandler = mockk<ApiHandler>()
+        every { apiHandler.getTimeZone() } returns ApiResponse.Success("tz")
+        every { apiHandler.getLocation() } returns ApiResponse.Success("location")
+
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        assertEquals(
+            ApiResponse.Success("tz"),
+            dispatcher.dispatch("timezone/get", JSONObject(), ActionDispatcher.Origin.HTTP),
+        )
+        assertEquals(
+            ApiResponse.Success("location"),
+            dispatcher.dispatch("/action/location/get", JSONObject(), ActionDispatcher.Origin.WEBSOCKET_REVERSE),
+        )
+    }
+
+    @Test
+    fun dispatch_locationGet_isRefusedOutsideTheCloudConnection() {
+        val apiHandler = mockk<ApiHandler>()
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        listOf(ActionDispatcher.Origin.HTTP, ActionDispatcher.Origin.WEBSOCKET_LOCAL).forEach { origin ->
+            assertTrue(dispatcher.dispatch("location/get", JSONObject(), origin) is ApiResponse.Error)
+        }
+        verify(exactly = 0) { apiHandler.getLocation() }
+    }
+
     @Test
     fun dispatch_tap_normalizesActionPrefixes() {
         val apiHandler = mockk<ApiHandler>()
@@ -109,7 +139,7 @@ class ActionDispatcherTest {
     }
 
     @Test
-    fun dispatch_deepLink_defaultsDisplayAndOptionalParams() {
+    fun dispatch_deepLink_defaultsDisplayAndOptionalParamsAndTrimsLink() {
         val apiHandler = mockk<ApiHandler>()
         every {
             apiHandler.openDeepLink(0, null, null, "example://path")
@@ -118,7 +148,7 @@ class ActionDispatcherTest {
         val response =
             ActionDispatcher(apiHandler).dispatch(
                 "app/deep-link",
-                JSONObject().put("deepLink", "example://path"),
+                JSONObject().put("deepLink", " example://path\n"),
             )
 
         assertEquals(ApiResponse.Success("Deep link opened"), response)
@@ -351,6 +381,94 @@ class ActionDispatcherTest {
         } finally {
             unmockkStatic(Base64::class)
         }
+    }
+
+    @Test
+    fun dispatch_smsMethods_routeToSmsApi() {
+        val apiHandler = mockk<ApiHandler>()
+        val sendParams = JSONObject()
+            .put("phone_number", "+15550001111")
+            .put("message", "hello")
+        val statusParams = JSONObject().put("message_id", "msg-1")
+        val listParams = JSONObject().put("box", "inbox")
+        val getParams = JSONObject().put("sms_id", "42")
+
+        every { apiHandler.getSmsCapabilities() } returns ApiResponse.Success("capabilities")
+        every { apiHandler.sendSms(sendParams) } returns ApiResponse.Success("sent")
+        every { apiHandler.getSmsStatus(statusParams) } returns ApiResponse.Success("status")
+        every { apiHandler.listSmsMessages(listParams) } returns ApiResponse.Success("messages")
+        every { apiHandler.getSmsMessage(getParams) } returns ApiResponse.Success("message")
+
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        assertEquals(ApiResponse.Success("capabilities"), dispatcher.dispatch("sms/capabilities", JSONObject()))
+        assertEquals(ApiResponse.Success("sent"), dispatcher.dispatch("sms/send", sendParams))
+        assertEquals(ApiResponse.Success("status"), dispatcher.dispatch("sms/status", statusParams))
+        assertEquals(ApiResponse.Success("messages"), dispatcher.dispatch("sms/messages/list", listParams))
+        assertEquals(ApiResponse.Success("message"), dispatcher.dispatch("sms/messages/get", getParams))
+
+        verify(exactly = 1) { apiHandler.getSmsCapabilities() }
+        verify(exactly = 1) { apiHandler.sendSms(sendParams) }
+        verify(exactly = 1) { apiHandler.getSmsStatus(statusParams) }
+        verify(exactly = 1) { apiHandler.listSmsMessages(listParams) }
+        verify(exactly = 1) { apiHandler.getSmsMessage(getParams) }
+    }
+
+    @Test
+    fun dispatch_smsBridgeMethods_routeOnlyFromTheRelaySocket() {
+        val apiHandler = mockk<ApiHandler>()
+        val bridgeSend = JSONObject().put("to", "+15550001111").put("body", "hello")
+        val legacySend = JSONObject().put("phone_number", "+15550001111").put("message", "hello")
+        every { apiHandler.handleSmsBridge(any(), any()) } returns ApiResponse.RawObject(JSONObject())
+        every { apiHandler.sendSms(any()) } returns ApiResponse.Success("legacy")
+        val dispatcher = ActionDispatcher(apiHandler)
+        val reverse = ActionDispatcher.Origin.WEBSOCKET_REVERSE
+
+        listOf("sms/list", "sms/get", "sms/subscriptions", "sms/sendStatus").forEach { method ->
+            dispatcher.dispatch(method, JSONObject(), reverse)
+            dispatcher.dispatch("/action/$method", JSONObject(), reverse)
+        }
+        dispatcher.dispatch("sms/send", bridgeSend, reverse)
+        assertEquals(ApiResponse.Success("legacy"), dispatcher.dispatch("sms/send", legacySend, reverse))
+
+        verify(exactly = 2) { apiHandler.handleSmsBridge("sms/list", any()) }
+        verify(exactly = 2) { apiHandler.handleSmsBridge("sms/sendStatus", any()) }
+        verify(exactly = 1) { apiHandler.handleSmsBridge("sms/send", bridgeSend) }
+        verify(exactly = 1) { apiHandler.sendSms(legacySend) }
+    }
+
+    @Test
+    fun dispatch_smsBridgeMethods_areNotExposedLocally() {
+        val apiHandler = mockk<ApiHandler>()
+        val bridgeSend = JSONObject().put("to", "+15550001111").put("body", "hello")
+        every { apiHandler.sendSms(bridgeSend) } returns ApiResponse.Success("legacy")
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        listOf(ActionDispatcher.Origin.HTTP, ActionDispatcher.Origin.WEBSOCKET_LOCAL).forEach { origin ->
+            listOf("sms/list", "sms/get", "sms/subscriptions", "sms/sendStatus").forEach { method ->
+                assertEquals(ApiResponse.Error("Unknown method: $method"), dispatcher.dispatch(method, JSONObject(), origin))
+            }
+            assertEquals(ApiResponse.Success("legacy"), dispatcher.dispatch("sms/send", bridgeSend, origin))
+        }
+        verify(exactly = 0) { apiHandler.handleSmsBridge(any(), any()) }
+    }
+
+    @Test
+    fun dispatch_smsGatewaySwitch_isNotExposed() {
+        val apiHandler = mockk<ApiHandler>()
+        val dispatcher = ActionDispatcher(apiHandler)
+        val params = JSONObject().put("enabled", true)
+
+        ActionDispatcher.Origin.entries.forEach { origin ->
+            listOf("sms/gateway", "/action/sms/gateway", "sms/gateway/set").forEach { method ->
+                val normalized = method.removePrefix("/action/")
+                assertEquals(
+                    ApiResponse.Error("Unknown method: $normalized"),
+                    dispatcher.dispatch(method, params, origin),
+                )
+            }
+        }
+        confirmVerified(apiHandler)
     }
 
     @Test
@@ -690,6 +808,67 @@ class ActionDispatcherTest {
         )
         verify(exactly = 0) { apiHandler.setScreenKeepAwakeEnabled(any()) }
         verify(exactly = 1) { apiHandler.getScreenKeepAwakeStatus() }
+    }
+
+    @Test
+    fun dispatch_reconnectAfterRestartSet_routesLocalAndHttpToApiHandler() {
+        val apiHandler = mockk<ApiHandler>()
+        val response = ApiResponse.RawObject(JSONObject().put("enabled", true))
+        every { apiHandler.setReconnectAfterRestartEnabled(true) } returns response
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        listOf(ActionDispatcher.Origin.HTTP, ActionDispatcher.Origin.WEBSOCKET_LOCAL).forEach { origin ->
+            assertEquals(
+                response,
+                dispatcher.dispatch(
+                    "cloud/reconnectAfterRestart/set",
+                    JSONObject().put("enabled", true),
+                    origin,
+                ),
+            )
+        }
+        verify(exactly = 2) { apiHandler.setReconnectAfterRestartEnabled(true) }
+    }
+
+    @Test
+    fun dispatch_reconnectAfterRestartSet_rejectsReverseAndMissingEnabled() {
+        val apiHandler = mockk<ApiHandler>(relaxed = true)
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        assertEquals(
+            ApiResponse.Error("Reconnect after restart can only be changed on the device"),
+            dispatcher.dispatch(
+                "cloud/reconnectAfterRestart/set",
+                JSONObject().put("enabled", true),
+                ActionDispatcher.Origin.WEBSOCKET_REVERSE,
+            ),
+        )
+        assertEquals(
+            ApiResponse.Error("Missing required param: 'enabled'"),
+            dispatcher.dispatch(
+                "cloud/reconnectAfterRestart/set",
+                JSONObject(),
+                ActionDispatcher.Origin.HTTP,
+            ),
+        )
+        verify(exactly = 0) { apiHandler.setReconnectAfterRestartEnabled(any()) }
+    }
+
+    @Test
+    fun dispatch_reconnectAfterRestartStatus_routesFromAnyOrigin() {
+        val apiHandler = mockk<ApiHandler>()
+        val response = ApiResponse.RawObject(JSONObject().put("enabled", false))
+        every { apiHandler.getReconnectAfterRestartStatus() } returns response
+        val dispatcher = ActionDispatcher(apiHandler)
+
+        assertEquals(
+            response,
+            dispatcher.dispatch(
+                "cloud/reconnectAfterRestart/status",
+                JSONObject(),
+                ActionDispatcher.Origin.WEBSOCKET_REVERSE,
+            ),
+        )
     }
 
     @Test

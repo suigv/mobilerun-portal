@@ -36,6 +36,7 @@ class PortalWebSocketServer(
     private val lightweightExecutor = Executors.newSingleThreadExecutor()
     private val commandExecutor = Executors.newSingleThreadExecutor()
     private val installExecutor = Executors.newSingleThreadExecutor()
+    private val locationExecutor = Executors.newSingleThreadExecutor()
     private val localDeviceEventRelay = LocalDeviceEventRelay(
         connectionsProvider = { connections.toList() },
         onSendFailure = { connection, error ->
@@ -48,6 +49,11 @@ class PortalWebSocketServer(
     )
     private val eventListener: (PortalEvent) -> Unit = { event ->
         localDeviceEventRelay.emit(event)
+    }
+
+    init {
+        // Needed for rapid disable/enable flows where sockets can linger in TIME_WAIT.
+        isReuseAddr = true
     }
 
     override fun onWebsocketHandshakeReceivedAsServer(
@@ -112,8 +118,10 @@ class PortalWebSocketServer(
                     when (WebSocketDispatchPolicy.bucketForNormalizedMethod(normalizedMethod)) {
                         WebSocketDispatchBucket.SIGNALING -> signalingExecutor
                         WebSocketDispatchBucket.LIGHTWEIGHT -> lightweightExecutor
-                        WebSocketDispatchBucket.COMMAND -> commandExecutor
+                        WebSocketDispatchBucket.COMMAND,
+                        WebSocketDispatchBucket.SMS -> commandExecutor
                         WebSocketDispatchBucket.INSTALL -> installExecutor
+                        WebSocketDispatchBucket.LOCATION -> locationExecutor
                     }
                 executor.submit {
                     dispatchAndRespond(
@@ -131,7 +139,7 @@ class PortalWebSocketServer(
                 handleCommand(conn, commandEvent)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing message: ${e.message}")
+            Log.e(TAG, "Error processing message (${e.javaClass.simpleName}, ${message?.length ?: 0} chars)")
         }
     }
 
@@ -265,6 +273,11 @@ class PortalWebSocketServer(
                 installExecutor.shutdownNow()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping install executor", e)
+            }
+            try {
+                locationExecutor.shutdownNow()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping location executor", e)
             }
         }
     }

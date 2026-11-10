@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.content.pm.ServiceInfo
 import android.os.Binder
@@ -22,30 +23,48 @@ import androidx.core.app.NotificationCompat
 import com.mobilerun.portal.R
 import com.mobilerun.portal.api.ApiHandler
 import com.mobilerun.portal.api.ApiResponse
+import com.mobilerun.portal.auth.CloudSessionChecker
+import com.mobilerun.portal.auth.DeviceCodeAuthClient
 import com.mobilerun.portal.config.ConfigManager
 import com.mobilerun.portal.core.StateRepository
 import com.mobilerun.portal.events.EventHub
 import com.mobilerun.portal.input.MobilerunKeyboardIME
+import com.mobilerun.portal.sms.SmsBridgeReporter
+import com.mobilerun.portal.sms.SmsSubscriptionResolver
 import com.mobilerun.portal.state.ConnectionState
 import com.mobilerun.portal.state.ConnectionStateManager
 import com.mobilerun.portal.streaming.WebRtcManager
 import org.java_websocket.client.WebSocketClient
+import org.java_websocket.framing.CloseFrame
 import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONObject
 import java.net.URI
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal fun shouldRedactReverseRequestPayload(normalizedMethod: String): Boolean =
-    normalizedMethod == "clipboard/set" || normalizedMethod == "app/deep-link"
+    normalizedMethod == "clipboard/set" || normalizedMethod == "app/deep-link" ||
+        normalizedMethod == "app/deep-link/resolve" || normalizedMethod.startsWith("sms/")
 
 internal fun shouldRedactReverseResponsePayload(normalizedMethod: String): Boolean =
-    normalizedMethod == "clipboard/get" || normalizedMethod == "app/deep-link"
+    normalizedMethod == "clipboard/get" || normalizedMethod == "location/get" || normalizedMethod == "app/deep-link" ||
+        normalizedMethod == "app/deep-link/resolve" || normalizedMethod.startsWith("sms/")
 
 internal enum class ReverseMediaRelease {
     STOP_CAPTURE,
     STOP_SESSIONS,
     NONE,
+}
+
+/** A real leave closes with a normal 1000 so the relay stops the device now; reconnect cleanup sends no close frame, so the relay sees an interruption. */
+internal fun closeRelaySocket(client: WebSocketClient, leave: Boolean) {
+    when {
+        leave -> client.close(CloseFrame.NORMAL, "user")
+        client.isOpen -> client.closeConnection(CloseFrame.ABNORMAL_CLOSE, "reconnect")
+        // Still connecting: close() sends no frame and lets the connect thread drop the socket.
+        else -> client.close(CloseFrame.ABNORMAL_CLOSE, "reconnect")
+    }
 }
 
 /** Capture-only (shared screenshot) captures are left to their own idle stop. */
@@ -83,8 +102,11 @@ class ReverseConnectionService : Service() {
         private const val TAG = "ReverseConnService"
         private const val CHANNEL_ID = "reverse_connection_channel"
         private const val NOTIFICATION_ID = 2002
+        private const val ALERT_CHANNEL_ID = "reverse_connection_alerts"
+        private const val ALERT_NOTIFICATION_ID = 2005
         private const val TOAST_DEBOUNCE_MS = 60_000L
         private const val CONNECTION_LOST_TIMEOUT_SEC = 30
+        private const val SESSION_CHECK_TICK_MS = 6 * 60 * 60 * 1000L
         private val RECONNECT_TOKEN = Any()
         const val ACTION_DISCONNECT = "com.mobilerun.portal.action.REVERSE_DISCONNECT"
         const val ACTION_RECONNECT = "com.mobilerun.portal.action.REVERSE_RECONNECT"
@@ -122,13 +144,38 @@ class ReverseConnectionService : Service() {
     private val lightweightExecutor = Executors.newSingleThreadExecutor()
     private val commandExecutor = Executors.newSingleThreadExecutor()
     private val installExecutor = Executors.newSingleThreadExecutor()
+    private val smsExecutor = Executors.newSingleThreadExecutor()
+    private val locationExecutor = Executors.newSingleThreadExecutor()
+    private val rpcTimeoutExecutor = Executors.newSingleThreadScheduledExecutor()
+
+    @Volatile
+    private var rpcSocket: ReverseRpcSocket? = null
+    internal val rpcCalls = ReverseRpcCalls(
+        transport = { rpcSocket?.takeIf { webSocketGeneration.isCurrent(it.generation) } },
+        schedule = { delayMs, task -> rpcTimeoutExecutor.schedule(task, delayMs, TimeUnit.MILLISECONDS) },
+        log = { Log.w(TAG, it) },
+    )
     private var lastReverseToastAtMs = 0L
     private var isForeground = false
 
     @Volatile
     private var foregroundSuppressed = false
 
-    private val reconnectBackoff = ReverseReconnectBackoff()
+    private val reconnectBackoff = ReverseReconnectBackoff(onNetworkRecheck = ::recheckNetworks)
+    private val sessionExecutor = Executors.newSingleThreadExecutor()
+    private val sessionChecker by lazy {
+        CloudSessionChecker(
+            client = DeviceCodeAuthClient(),
+            config = configManager,
+            executor = sessionExecutor,
+            nowMs = System::currentTimeMillis,
+            onSessionEnded = { token -> handler.post { onCloudSessionEnded(token) } },
+        )
+    }
+    private val sessionCheckTask = Runnable {
+        sessionChecker.checkIfDue()
+        scheduleSessionCheck()
+    }
 
     @Volatile
     private var lastStartId = -1
@@ -177,6 +224,12 @@ class ReverseConnectionService : Service() {
         if (intent?.action == ACTION_STOP) {
             Log.i(TAG, "onStartCommand: Stop requested")
             ensureForeground(deferNotification = true)
+            cancelGaveUpNotification()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (shouldStopStickyRestart(intent != null, configManager.reverseConnectionWasEnabled)) {
+            Log.i(TAG, "onStartCommand: Sticky restart after the connection was turned off; stopping")
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -184,6 +237,7 @@ class ReverseConnectionService : Service() {
         ensureForeground()
         terminalState = null
         reverseMediaReleased = false
+        cancelGaveUpNotification()
         val explicitReconnect = intent?.action == ACTION_RECONNECT
         if (explicitReconnect) {
             Log.i(TAG, "onStartCommand: Reconnect requested with latest cloud config")
@@ -215,6 +269,8 @@ class ReverseConnectionService : Service() {
                 TAG,
                 "onStartCommand: Starting Reverse Connection Service, calling connectToHost()"
             )
+            // A sticky restart runs in a new process, where the runtime flag starts off.
+            configManager.reverseConnectionEnabled = true
             connectToHost()
         } else {
             Log.d(TAG, "onStartCommand: Service already running, skipping connectToHost()")
@@ -253,6 +309,22 @@ class ReverseConnectionService : Service() {
         }
         try {
             installExecutor.shutdownNow()
+        } catch (_: Exception) {
+        }
+        try {
+            smsExecutor.shutdownNow()
+        } catch (_: Exception) {
+        }
+        try {
+            locationExecutor.shutdownNow()
+        } catch (_: Exception) {
+        }
+        try {
+            rpcTimeoutExecutor.shutdownNow()
+        } catch (_: Exception) {
+        }
+        try {
+            sessionExecutor.shutdownNow()
         } catch (_: Exception) {
         }
         if (isForeground) {
@@ -303,6 +375,8 @@ class ReverseConnectionService : Service() {
             headers["X-Remote-Device-Key"] = serviceKey
         }
 
+        headers.putAll(PortalCapabilityTokens.headers(SmsSubscriptionResolver(this).hasTelephony()))
+
         return headers
     }
 
@@ -323,7 +397,7 @@ class ReverseConnectionService : Service() {
                 configManager.reverseConnectionToken.isNotBlank()
             } serviceKeyPresent=${configManager.reverseConnectionServiceKey.isNotBlank()} headerNames=${
                 headers.keys.sorted().joinToString()
-            }",
+            } capabilities=${headers[PortalCapabilityTokens.CAPABILITIES_HEADER]}",
         )
     }
 
@@ -349,7 +423,7 @@ class ReverseConnectionService : Service() {
         try {
             Log.d(TAG, "connectToHost: Setting state to CONNECTING")
             ConnectionStateManager.setState(ConnectionState.CONNECTING)
-            val connectionGeneration = closeWebSocket() // Prevent resource leaks from zombie connections
+            val connectionGeneration = closeWebSocket(leave = false) // Prevent resource leaks from zombie connections
             val finalUrl = hostUrl.replace("{deviceId}", configManager.deviceID)
             val uri = URI(finalUrl)
             val headers = buildHeaders()
@@ -362,10 +436,15 @@ class ReverseConnectionService : Service() {
                         TAG,
                         "onOpen: Connected to Host: $hostUrl, status=${handshakedata?.httpStatus}, message=${handshakedata?.httpStatusMessage}"
                     )
+                    rpcSocket = ReverseRpcSocket(this, connectionGeneration)
+                    SmsBridgeReporter.onSocketOpen()
                     retryController.onConnected()
                     reconnectBackoff.onConnected(SystemClock.elapsedRealtime())
                     reverseMediaReleased = false
                     ConnectionStateManager.setState(ConnectionState.CONNECTED)
+                    cancelGaveUpNotification()
+                    sessionChecker.checkIfDue()
+                    scheduleSessionCheck()
                     showReverseConnectionToastIfEnoughTimeIsPassed()
                     WebRtcManager.getExistingInstance()?.let { manager ->
                         manager.setReverseConnectionService(this@ReverseConnectionService)
@@ -376,12 +455,15 @@ class ReverseConnectionService : Service() {
 
                 override fun onMessage(message: String?) {
                     if (!isCurrentWebSocketCallback(connectionGeneration, "onMessage")) return
+                    // The tick pauses in deep sleep; traffic also wakes the check.
+                    sessionChecker.checkIfDue()
                     handleMessage(this, message)
                 }
 
                 override fun onClose(code: Int, reason: String?, remote: Boolean) {
                     if (!isCurrentWebSocketCallback(connectionGeneration, "onClose")) return
                     Log.w(TAG, "Disconnected from Host: code=$code reason=$reason remote=$remote")
+                    releaseRpcSocket(connectionGeneration)
                     logNetworkState("onClose")
 
                     when (val decision = retryController.onClose(reason, ::cancelPendingReconnects)) {
@@ -404,8 +486,8 @@ class ReverseConnectionService : Service() {
                         ReverseConnectionRetryDecision.Retry -> Unit
                     }
 
-                    // Transient disconnect: preserve media pipeline, just reconnect WS
-                    ConnectionStateManager.setState(ConnectionState.DISCONNECTED)
+                    // Transient disconnect: preserve media pipeline, just reconnect WS.
+                    // scheduleReconnect shows RECONNECTING, or DISCONNECTED once it gives up.
                     scheduleReconnect(connectionGeneration)
                 }
 
@@ -419,7 +501,7 @@ class ReverseConnectionService : Service() {
                     logNetworkState("onError")
                     // onClose usually follows; schedule reconnect as safety net
                     // (isReconnecting guard prevents duplicate scheduling)
-                    scheduleReconnect(connectionGeneration)
+                    scheduleReconnect(connectionGeneration, fromError = true)
                 }
             }
             Log.i(TAG, "connectToHost: Created WebSocketClient, calling connect()...")
@@ -435,7 +517,26 @@ class ReverseConnectionService : Service() {
 
     private var isReconnecting = AtomicBoolean(false)
 
-    private fun scheduleReconnect(connectionGeneration: Long = webSocketGeneration.current()) {
+    /** An open socket never refreshes the session, so ping get-session before it lapses. */
+    private fun scheduleSessionCheck() {
+        handler.removeCallbacks(sessionCheckTask)
+        if (isServiceRunning.get() && configManager.cloudSessionActive) {
+            handler.postDelayed(sessionCheckTask, SESSION_CHECK_TICK_MS)
+        }
+    }
+
+    private fun onCloudSessionEnded(token: String) {
+        if (!configManager.clearCloudSessionIfCurrent(token)) return
+        Log.i(TAG, "Cloud session ended; sign-in required")
+        configManager.reverseConnectionEnabled = false
+        ConnectionStateManager.setState(ConnectionState.UNAUTHORIZED)
+        stopAfterTerminalState(ConnectionState.UNAUTHORIZED, webSocketGeneration.current())
+    }
+
+    private fun scheduleReconnect(
+        connectionGeneration: Long = webSocketGeneration.current(),
+        fromError: Boolean = false,
+    ) {
         retryController.blockedPresentationStateOrNull()?.let { blockedState ->
             Log.i(TAG, "Ignoring reconnect request while HTTP 402 block is active")
             restoreHttp402BlockedState(blockedState)
@@ -449,18 +550,22 @@ class ReverseConnectionService : Service() {
         if (!isServiceRunning.get()) return
         if (isReconnecting.getAndSet(true)) return // Already scheduled
 
-        val step = reconnectBackoff.nextRetry(SystemClock.elapsedRealtime())
-        if (step.releaseMedia) {
-            Log.w(
-                TAG,
-                "No stable connection for ${ReverseReconnectBackoff.LONG_OUTAGE_MS / 60_000}min, releasing media",
-            )
-            releaseReverseMedia("ws_disconnected")
+        val delayMs = reconnectBackoff.nextRetry(SystemClock.elapsedRealtime(), hasNetwork())
+        if (delayMs == null) {
+            // onClose follows onError and may carry a terminal status, so it decides the stop.
+            if (fromError) {
+                isReconnecting.set(false)
+                return
+            }
+            Log.i(TAG, "No connection within the retry budget; stopping until Reconnect")
+            ConnectionStateManager.setState(ConnectionState.DISCONNECTED)
+            stopAfterTerminalState(ConnectionState.DISCONNECTED, connectionGeneration, gaveUp = true)
+            return
         }
         webSocketGeneration.markReconnectScheduled(connectionGeneration)
 
         ConnectionStateManager.setState(ConnectionState.RECONNECTING)
-        Log.d(TAG, "Scheduling reconnect in ${step.delayMs}ms")
+        Log.d(TAG, "Scheduling reconnect in ${delayMs}ms")
         val reconnect = Runnable {
             retryController.blockedPresentationStateOrNull()?.let { blockedState ->
                 Log.i(TAG, "Skipping delayed reconnect while HTTP 402 block is active")
@@ -482,7 +587,38 @@ class ReverseConnectionService : Service() {
                 ConnectionStateManager.setState(ConnectionState.DISCONNECTED)
             }
         }
-        handler.postAtTime(reconnect, RECONNECT_TOKEN, SystemClock.uptimeMillis() + step.delayMs)
+        handler.postAtTime(reconnect, RECONNECT_TOKEN, SystemClock.uptimeMillis() + delayMs)
+    }
+
+    private fun hasNetwork(): Boolean {
+        val connectivityManager =
+            getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        return countedNetworks(connectivityManager).isNotEmpty()
+    }
+
+    /** Asks Android to re-probe the counted networks, so one that lost its internet drops VALIDATED. */
+    private fun recheckNetworks() {
+        val connectivityManager =
+            getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        try {
+            countedNetworks(connectivityManager).forEach {
+                connectivityManager.reportNetworkConnectivity(it, false)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not ask Android to recheck the network", e)
+        }
+    }
+
+    /** Only a validated non-VPN network counts: a VPN can outlive the network under it, and Wi-Fi may have no internet. */
+    private fun countedNetworks(connectivityManager: ConnectivityManager): List<Network> {
+        @Suppress("DEPRECATION")
+        return connectivityManager.allNetworks.filter { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+            capabilities != null &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }
     }
 
     private fun clearStaleQueuedReconnectOwner() {
@@ -510,10 +646,11 @@ class ReverseConnectionService : Service() {
         ConnectionStateManager.setState(state)
     }
 
-    private fun closeWebSocket(): Long {
+    private fun closeWebSocket(leave: Boolean): Long {
         val connectionGeneration = webSocketGeneration.advance()
+        releaseRpcSocket(connectionGeneration - 1)
         try {
-            webSocketClient?.close()
+            webSocketClient?.let { closeRelaySocket(it, leave) }
             webSocketClient = null
         } catch (e: Exception) {
             Log.e(TAG, "Error closing connection", e)
@@ -522,7 +659,13 @@ class ReverseConnectionService : Service() {
     }
 
     private fun disconnect() {
-        closeWebSocket()
+        closeWebSocket(leave = true)
+    }
+
+    private fun releaseRpcSocket(closedGeneration: Long) {
+        rpcSocket = null
+        rpcCalls.failAll(closedGeneration)
+        SmsBridgeReporter.onSocketClosed()
     }
 
     private fun isCurrentWebSocketCallback(connectionGeneration: Long, callback: String): Boolean {
@@ -542,6 +685,7 @@ class ReverseConnectionService : Service() {
         reverseMediaReleased = true
         disconnect()
         ConnectionStateManager.setState(ConnectionState.DISCONNECTED)
+        cancelGaveUpNotification()
         // A newer queued start must still reach onStartCommand, and its sender owns the enabled flag.
         if (stopSelfResult(startId)) {
             configManager.reverseConnectionEnabled = false
@@ -549,13 +693,20 @@ class ReverseConnectionService : Service() {
     }
 
     /** Stops the service after a terminal close so it is not left sticky in the foreground. */
-    private fun stopAfterTerminalState(state: ConnectionState, connectionGeneration: Long) {
+    private fun stopAfterTerminalState(
+        state: ConnectionState,
+        connectionGeneration: Long,
+        gaveUp: Boolean = false,
+    ) {
         handler.post {
             if (!webSocketGeneration.isCurrent(connectionGeneration)) {
                 Log.d(TAG, "Skipping stale terminal stop for generation $connectionGeneration")
                 return@post
             }
+            if (gaveUp) showGaveUpNotification()
             terminalState = state
+            // A rejected credential would only fail again after a restart.
+            if (state == ConnectionState.UNAUTHORIZED) configManager.clearReverseConnectionWasEnabled()
             isServiceRunning.set(false)
             cancelPendingReconnects()
             releaseReverseMedia("ws_disconnected")
@@ -685,6 +836,40 @@ class ReverseConnectionService : Service() {
             NotificationManager.IMPORTANCE_LOW
         )
         manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                ALERT_CHANNEL_ID,
+                getString(R.string.reverse_connection_alert_channel),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ),
+        )
+    }
+
+    /** Posted only when the retry budget runs out; without POST_NOTIFICATIONS it is dropped. */
+    private fun showGaveUpNotification() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            2,
+            Intent(this, com.mobilerun.portal.ui.MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle(getString(R.string.reverse_connection_gave_up_title))
+            .setContentText(getString(R.string.reverse_connection_gave_up_text))
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+        try {
+            manager.notify(ALERT_NOTIFICATION_ID, notification)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Could not post the disconnect alert", e)
+        }
+    }
+
+    private fun cancelGaveUpNotification() {
+        getSystemService(NotificationManager::class.java)?.cancel(ALERT_NOTIFICATION_ID)
     }
 
     private fun createNotification(deferred: Boolean): Notification {
@@ -741,6 +926,9 @@ class ReverseConnectionService : Service() {
         }
     }
 
+    private fun isCurrentSocket(client: WebSocketClient): Boolean =
+        rpcSocket?.client === client && client.isOpen
+
     private fun handleMessage(client: WebSocketClient, message: String?) {
         if (message == null) return
 
@@ -750,7 +938,7 @@ class ReverseConnectionService : Service() {
         try {
             // Check if the message is a valid JSON before parsing
             if (!message.trim().startsWith("{") && !message.trim().startsWith("[")) {
-                Log.w(TAG, "Received non-JSON message: $message")
+                Log.w(TAG, "Received non-JSON message (${message.length} chars)")
                 return
             }
 
@@ -772,6 +960,13 @@ class ReverseConnectionService : Service() {
             }
 
             if (method.isEmpty()) {
+                val socket = rpcSocket
+                if (socket != null && socket.client === client &&
+                    rpcCalls.onResponse(json, socket.generation)
+                ) {
+                    Log.d(TAG, "Received reply to device call id=$id")
+                    return
+                }
                 if (json.has("result")) {
                     Log.d(TAG, "Received JSON-RPC result for id=$id")
                 } else if (json.has("error")) {
@@ -795,7 +990,7 @@ class ReverseConnectionService : Service() {
             val dispatcher = resolveActionDispatcher(normalizedMethod)
             if (dispatcher == null) {
                 val error =
-                    "Accessibility Service not ready. Only stream/*, webrtc/*, screen/keepAwake/*, global, and triggers/* are available."
+                    "Accessibility Service not ready. Only version, timezone/get, location/get, stream/*, webrtc/*, screen/keepAwake/*, cloud/reconnectAfterRestart/status, global, clipboard/*, app/deep-links, app/deep-link/resolve, sms/*, and triggers/* are available."
                 Log.e(TAG, error)
                 sendErrorResponse(client, id, error, normalizedMethod)
                 return
@@ -803,14 +998,21 @@ class ReverseConnectionService : Service() {
 
             val requestId = id
             val dispatchStartedAtMs = SystemClock.elapsedRealtime()
+            val bucket = WebSocketDispatchPolicy.bucketForNormalizedMethod(normalizedMethod)
             val executor =
-                when (WebSocketDispatchPolicy.bucketForNormalizedMethod(normalizedMethod)) {
+                when (bucket) {
                     WebSocketDispatchBucket.SIGNALING -> signalingExecutor
                     WebSocketDispatchBucket.LIGHTWEIGHT -> lightweightExecutor
                     WebSocketDispatchBucket.COMMAND -> commandExecutor
                     WebSocketDispatchBucket.INSTALL -> installExecutor
+                    WebSocketDispatchBucket.SMS -> smsExecutor
+                    WebSocketDispatchBucket.LOCATION -> locationExecutor
                 }
             executor.submit {
+                if (WebSocketDispatchPolicy.requiresOriginSocket(bucket) && !isCurrentSocket(client)) {
+                    Log.w(TAG, "Dropped $normalizedMethod (id=$requestId): its socket was closed")
+                    return@submit
+                }
                 dispatchAndRespond(
                     client = client,
                     dispatcher = dispatcher,
@@ -823,7 +1025,8 @@ class ReverseConnectionService : Service() {
                 )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing message", e)
+            // The exception text can contain the whole frame, including SMS content.
+            Log.e(TAG, "Error processing message (${e.javaClass.simpleName}, ${message.length} chars)")
             sendErrorResponse(
                 client,
                 id,

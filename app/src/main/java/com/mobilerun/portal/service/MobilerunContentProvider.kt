@@ -1,14 +1,17 @@
 package com.mobilerun.portal.service
 
+import android.Manifest
 import android.content.ContentProvider
 import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
 import android.content.UriMatcher
 import android.database.Cursor
+import android.content.pm.PackageManager
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Binder
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import androidx.core.net.toUri
@@ -199,6 +202,82 @@ internal fun handleWebSocketServerToggleInsert(
     return ApiResponse.Success("WebSocket server ${if (enabled) "enabled" else "disabled"} on port $port")
 }
 
+internal fun buildStreamSessionLimitResponse(configManager: ConfigManager): ApiResponse {
+    return ApiResponse.RawObject(
+        JSONObject().apply {
+            put("limit", configManager.streamSessionLimit)
+            put("min", ConfigManager.MIN_STREAM_SESSION_LIMIT)
+            put("max", ConfigManager.MAX_STREAM_SESSION_LIMIT)
+        },
+    )
+}
+
+internal fun handleStreamSessionLimitInsert(
+    configManager: ConfigManager,
+    values: ContentValues?,
+): ApiResponse {
+    val min = ConfigManager.MIN_STREAM_SESSION_LIMIT
+    val max = ConfigManager.MAX_STREAM_SESSION_LIMIT
+    val limit = values?.getAsInteger("limit")
+        ?: return ApiResponse.Error("Missing required integer field: limit")
+    if (limit !in min..max) {
+        return ApiResponse.Error("limit must be between $min and $max")
+    }
+    configManager.setStreamSessionLimitWithNotification(limit)
+    return ApiResponse.Success("Stream session limit set to $limit")
+}
+
+internal fun handleSmsGatewayInsert(
+    configManager: ConfigManager,
+    values: ContentValues?,
+): ApiResponse {
+    val enabled = values?.getAsBoolean("enabled")
+        ?: return ApiResponse.Error("Missing required field: enabled")
+    configManager.smsGatewayEnabled = enabled
+    return ApiResponse.Success("SMS gateway set to $enabled")
+}
+
+internal fun buildDeviceAudioStatus(
+    configManager: ConfigManager,
+    permissionGranted: Boolean,
+    supported: Boolean,
+): ApiResponse =
+    ApiResponse.RawObject(
+        JSONObject().apply {
+            put("enabled", configManager.deviceAudioEnabled)
+            put("permissionGranted", permissionGranted)
+            put("supported", supported)
+        },
+    )
+
+// Sets the flag only; RECORD_AUDIO is never requested from here.
+internal fun handleDeviceAudioInsert(
+    configManager: ConfigManager,
+    values: ContentValues?,
+    permissionGranted: Boolean,
+    supported: Boolean,
+): ApiResponse {
+    val enabled = values?.getAsBoolean("enabled")
+        ?: return ApiResponse.Error("Missing required field: enabled")
+    configManager.deviceAudioEnabled = enabled
+    val note = when {
+        !enabled -> ""
+        !supported -> "; device audio needs Android 10+"
+        !permissionGranted -> "; RECORD_AUDIO permission is missing"
+        else -> ""
+    }
+    return ApiResponse.Success("Device audio set to $enabled$note")
+}
+
+internal fun handleReconnectAfterRestartInsert(
+    configManager: ConfigManager,
+    values: ContentValues?,
+): ApiResponse {
+    val enabled = values?.getAsBoolean("enabled")
+        ?: return ApiResponse.Error("Missing required field: enabled")
+    return setReconnectAfterRestart(configManager, enabled)
+}
+
 internal fun readProviderStringValue(
     values: ContentValues?,
     key: String,
@@ -264,7 +343,6 @@ internal fun handleCloudConnectInsert(
     return try {
         configManager.reverseConnectionUrl = url
         configManager.reverseConnectionToken = apiKey
-        configManager.forceLoginOnNextConnect = false
         beforeEnable()
         configManager.reverseConnectionEnabled = true
         startReverseConnectionService(appContext, ReverseConnectionService.ACTION_RECONNECT)
@@ -287,6 +365,15 @@ internal fun buildCloudStatusResponse(
     val json = JSONObject().apply {
         put("connectionState", connectionState.name)
         put("tokenPresent", configManager.reverseConnectionToken.trim().isNotEmpty())
+        put("reconnectAfterRestart", configManager.reconnectAfterRestartEnabled)
+        put(
+            "credentialType",
+            when {
+                configManager.cloudSessionActive -> "session"
+                configManager.reverseConnectionToken.isBlank() -> "none"
+                else -> "api_key"
+            },
+        )
         put("deviceId", configManager.deviceID)
         put("reverseConnectionUrl", configManager.reverseConnectionUrlOrDefault)
         if (activeTask != null) {
@@ -563,6 +650,17 @@ class MobilerunContentProvider : ContentProvider() {
         private const val CLOUD_CONNECT = 34
         private const val CLOUD_STATUS = 35
         private const val CLOUD_TASKS_LAUNCH = 36
+        private const val STREAM_SESSION_LIMIT = 37
+        private const val APP_DEEP_LINKS = 38
+        private const val APP_DEEP_LINK_RESOLVE = 39
+        private const val SMS_CAPABILITIES = 40
+        private const val SMS_STATUS = 41
+        private const val SMS_MESSAGES = 42
+        private const val SMS_MESSAGE = 43
+        private const val SMS_SEND = 44
+        private const val SMS_GATEWAY = 45
+        private const val CLOUD_RECONNECT_AFTER_RESTART = 46
+        private const val DEVICE_AUDIO = 47
 
         private val uriMatcher = UriMatcher(UriMatcher.NO_MATCH).apply {
             addURI(AUTHORITY, "a11y_tree", A11Y_TREE)
@@ -600,7 +698,18 @@ class MobilerunContentProvider : ContentProvider() {
             addURI(AUTHORITY, "clipboard/set", CLIPBOARD_SET)
             addURI(AUTHORITY, "cloud/connect", CLOUD_CONNECT)
             addURI(AUTHORITY, "cloud/status", CLOUD_STATUS)
+            addURI(AUTHORITY, "cloud/reconnect_after_restart", CLOUD_RECONNECT_AFTER_RESTART)
             addURI(AUTHORITY, "cloud/tasks/launch", CLOUD_TASKS_LAUNCH)
+            addURI(AUTHORITY, "stream_session_limit", STREAM_SESSION_LIMIT)
+            addURI(AUTHORITY, "app/deep-links", APP_DEEP_LINKS)
+            addURI(AUTHORITY, "app/deep-link/resolve", APP_DEEP_LINK_RESOLVE)
+            addURI(AUTHORITY, "sms/capabilities", SMS_CAPABILITIES)
+            addURI(AUTHORITY, "sms/status", SMS_STATUS)
+            addURI(AUTHORITY, "sms/messages", SMS_MESSAGES)
+            addURI(AUTHORITY, "sms/messages/*", SMS_MESSAGE)
+            addURI(AUTHORITY, "sms/send", SMS_SEND)
+            addURI(AUTHORITY, "sms/gateway", SMS_GATEWAY)
+            addURI(AUTHORITY, "device_audio", DEVICE_AUDIO)
         }
     }
 
@@ -619,6 +728,11 @@ class MobilerunContentProvider : ContentProvider() {
             false
         }
     }
+
+    private fun hasRecordAudioPermission(): Boolean =
+        context?.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun isDeviceAudioSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
     private fun getAppVersion(): String {
         val appContext = context ?: return "unknown"
@@ -694,6 +808,9 @@ class MobilerunContentProvider : ContentProvider() {
                 VERSION -> ApiResponse.Success(getAppVersion())
                 AUTH_TOKEN -> ApiResponse.Text(configManager.authToken)
                 CLOUD_STATUS -> buildCloudStatusResponse(configManager)
+                CLOUD_RECONNECT_AFTER_RESTART -> buildReconnectAfterRestartStatus(configManager)
+                STREAM_SESSION_LIMIT -> buildStreamSessionLimitResponse(configManager)
+                DEVICE_AUDIO -> buildDeviceAudioStatus(configManager, hasRecordAudioPermission(), isDeviceAudioSupported())
                 SCREEN_KEEP_AWAKE_STATUS -> ApiResponse.RawObject(
                     KeepAliveController.getStatusJson(context ?: throw IllegalStateException("Provider context unavailable")),
                 )
@@ -707,6 +824,14 @@ class MobilerunContentProvider : ContentProvider() {
                 TRIGGERS_RULE,
                 TRIGGERS_RUNS,
                 -> handleTriggerQuery(match, uri)
+                APP_DEEP_LINKS,
+                APP_DEEP_LINK_RESOLVE,
+                -> handleDeepLinkQuery(match, uri)
+                SMS_CAPABILITIES,
+                SMS_STATUS,
+                SMS_MESSAGES,
+                SMS_MESSAGE,
+                -> handleSmsQuery(match, uri)
                 else -> {
                     val handler = getHandler()
                     if (handler == null) {
@@ -765,8 +890,62 @@ class MobilerunContentProvider : ContentProvider() {
         }
     }
 
+    private fun handleDeepLinkQuery(match: Int, uri: Uri): ApiResponse {
+        val handler = getHeadlessCapableHandler() ?: return ApiResponse.Error("Provider context unavailable")
+        val packageName = uri.optionalQueryParameter("package")
+            ?: uri.optionalQueryParameter("packageName")
+            ?: return ApiResponse.Error("Missing required param: 'package'")
+        if (match == APP_DEEP_LINKS) return handler.getDeepLinks(packageName)
+        val deepLink = uri.optionalQueryParameter("deepLink")
+            ?: return ApiResponse.Error("Missing required param: 'deepLink'")
+        return handler.resolveDeepLink(packageName, deepLink, uri.optionalQueryParameter("action"))
+    }
+
+    private fun handleSmsQuery(match: Int, uri: Uri): ApiResponse {
+        val handler = getHeadlessCapableHandler()
+            ?: return ApiResponse.Error("Provider context unavailable")
+        return when (match) {
+            SMS_CAPABILITIES -> handler.getSmsCapabilities()
+            SMS_STATUS -> handler.getSmsStatus(smsParamsFromUri(uri))
+            SMS_MESSAGES -> handler.listSmsMessages(smsParamsFromUri(uri))
+            SMS_MESSAGE -> handler.getSmsMessage(
+                JSONObject().put("sms_id", uri.lastPathSegment.orEmpty()),
+            )
+
+            else -> ApiResponse.Error("Unknown SMS endpoint: ${uri.path}")
+        }
+    }
+
+    private fun Uri.optionalQueryParameter(key: String): String? =
+        getQueryParameter(key)?.trim()?.takeUnless { it.isEmpty() || it == "null" }
+
     private fun getStringValue(values: ContentValues?, key: String): String? {
         return readProviderStringValue(values, key, TAG)
+    }
+
+    private fun smsParamsFromUri(uri: Uri): JSONObject {
+        return JSONObject().apply {
+            uri.queryParameterNames.forEach { key ->
+                put(key, uri.getQueryParameter(key))
+            }
+        }
+    }
+
+    private fun smsParamsFromValues(values: ContentValues?): JSONObject {
+        return JSONObject().apply {
+            getStringValue(values, "phone_number")?.let { put("phone_number", it) }
+            getStringValue(values, "message")?.let { put("message", it) }
+            getStringValue(values, "message_id")?.let { put("message_id", it) }
+            getStringValue(values, "subscription_id")?.let { put("subscription_id", it) }
+            getStringValue(values, "sim_slot")?.let { put("sim_slot", it) }
+            values?.getAsBoolean("delivery_report")?.let { put("delivery_report", it) }
+        }
+    }
+
+    private fun handleSmsSendInsert(values: ContentValues?): ApiResponse {
+        val handler = getHeadlessCapableHandler()
+            ?: return ApiResponse.Error("Provider context unavailable")
+        return handler.sendSms(smsParamsFromValues(values))
     }
 
     private fun handleConfigureReverseConnectionInsert(values: ContentValues?): ApiResponse {
@@ -820,6 +999,24 @@ class MobilerunContentProvider : ContentProvider() {
             return cloudTaskLaunchResultUri(response)
         }
 
+        if (match == SMS_SEND) {
+            return responseToResultUri(handleSmsSendInsert(values))
+        }
+
+        if (match == SMS_GATEWAY) {
+            return responseToResultUri(handleSmsGatewayInsert(configManager, values))
+        }
+
+        if (match == CLOUD_RECONNECT_AFTER_RESTART) {
+            return responseToResultUri(handleReconnectAfterRestartInsert(configManager, values))
+        }
+
+        if (match == DEVICE_AUDIO) {
+            return responseToResultUri(
+                handleDeviceAudioInsert(configManager, values, hasRecordAudioPermission(), isDeviceAudioSupported()),
+            )
+        }
+
         if (match == CONFIGURE_REVERSE_CONNECTION) {
             return responseToResultUri(handleConfigureReverseConnectionInsert(values))
         }
@@ -865,6 +1062,10 @@ class MobilerunContentProvider : ContentProvider() {
                 enabled,
             )
             return responseToResultUri(response)
+        }
+
+        if (match == STREAM_SESSION_LIMIT) {
+            return responseToResultUri(handleStreamSessionLimitInsert(configManager, values))
         }
 
         if (match == CLIPBOARD_SET) {
@@ -1006,6 +1207,16 @@ class MobilerunContentProvider : ContentProvider() {
 
             is ApiResponse.Error ->
                 "content://$AUTHORITY/result?status=error&message=${Uri.encode(response.message)}".toUri()
+
+            is ApiResponse.RawObject ->
+                Uri.Builder()
+                    .scheme("content")
+                    .authority(AUTHORITY)
+                    .path("result")
+                    .appendQueryParameter("status", "success")
+                    .appendQueryParameter("message", "ok")
+                    .appendQueryParameter("result", response.json.toString())
+                    .build()
 
             else ->
                 "content://$AUTHORITY/result?status=error&message=${Uri.encode("Unsupported response type")}".toUri()
