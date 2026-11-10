@@ -45,7 +45,6 @@ import com.google.android.material.datepicker.MaterialDatePicker
 import com.google.android.material.timepicker.MaterialTimePicker
 import com.google.android.material.timepicker.TimeFormat
 import java.util.Calendar
-import java.util.Locale
 import java.util.TimeZone
 import androidx.core.net.toUri
 
@@ -86,30 +85,46 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
     private val portalCloudClient = PortalCloudClient()
     private val configManager by lazy { ConfigManager.getInstance(this) }
     private val sourceOptions by lazy {
-        TriggerSource.entries.map { LabeledValue(TriggerUiSupport.sourceLabel(it), it) }
+        TriggerSource.entries.map { LabeledValue(TriggerUiSupport.sourceLabel(this, it), it) }
     }
     private val matchModeOptions by lazy {
-        TriggerStringMatchMode.entries.map { LabeledValue(it.name.replace('_', ' '), it) }
+        TriggerStringMatchMode.entries.map {
+            LabeledValue(getString(when (it) {
+                TriggerStringMatchMode.CONTAINS -> R.string.trigger_option_contains
+                TriggerStringMatchMode.REGEX -> R.string.trigger_option_regex
+            }), it)
+        }
     }
     private val thresholdComparisonOptions by lazy {
-        TriggerThresholdComparison.entries.map { LabeledValue(it.name.replace('_', ' '), it) }
+        TriggerThresholdComparison.entries.map {
+            LabeledValue(getString(when (it) {
+                TriggerThresholdComparison.AT_OR_BELOW -> R.string.trigger_option_at_or_below
+                TriggerThresholdComparison.AT_OR_ABOVE -> R.string.trigger_option_at_or_above
+            }), it)
+        }
     }
     private val networkTypeOptions by lazy {
-        listOf(LabeledValue("Any", null)) + TriggerNetworkType.entries.map {
-            LabeledValue(it.name.replace('_', ' '), it)
+        listOf(LabeledValue(getString(R.string.trigger_option_any), null)) + TriggerNetworkType.entries.map {
+            LabeledValue(getString(when (it) {
+                TriggerNetworkType.NONE -> R.string.trigger_network_none
+                TriggerNetworkType.WIFI -> R.string.trigger_network_wifi
+                TriggerNetworkType.CELLULAR -> R.string.trigger_network_cellular
+                TriggerNetworkType.ETHERNET -> R.string.trigger_network_ethernet
+                TriggerNetworkType.OTHER -> R.string.trigger_network_other
+            }), it)
         }
     }
     private val repeatModeOptions by lazy {
         listOf(
-            LabeledValue("Every day", TriggerSource.TIME_DAILY),
-            LabeledValue("Selected weekdays", TriggerSource.TIME_WEEKLY),
+            LabeledValue(getString(R.string.trigger_option_every_day), TriggerSource.TIME_DAILY),
+            LabeledValue(getString(R.string.trigger_option_selected_weekdays), TriggerSource.TIME_WEEKLY),
         )
     }
     private val runLimitOptions by lazy {
         listOf(
-            LabeledValue("Always", RunLimitMode.ALWAYS),
-            LabeledValue("Once", RunLimitMode.ONCE),
-            LabeledValue("Custom", RunLimitMode.CUSTOM),
+            LabeledValue(getString(R.string.trigger_option_always), RunLimitMode.ALWAYS),
+            LabeledValue(getString(R.string.trigger_option_once), RunLimitMode.ONCE),
+            LabeledValue(getString(R.string.trigger_option_custom), RunLimitMode.CUSTOM),
         )
     }
 
@@ -282,9 +297,9 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
         )
 
         binding.topAppBar.title = if (originalRule == null) {
-            "Add trigger rule"
+            getString(R.string.portal_ui_add_trigger_rule)
         } else {
-            "Edit trigger rule"
+            getString(R.string.trigger_edit_rule)
         }
         binding.editActionsRow.isVisible = originalRule != null
 
@@ -356,7 +371,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
             binding.modelRetryButton.isVisible = false
             binding.modelWarningText.isVisible = true
             binding.modelWarningText.text =
-                "Connect to Mobilerun to load models."
+                getString(R.string.trigger_connect_for_models)
             return
         }
 
@@ -396,7 +411,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
             sourceOptions.firstOrNull { it.value == source }?.label.orEmpty(),
             false,
         )
-        binding.triggerSourceDescriptionText.text = TriggerUiSupport.sourceDescription(source)
+        binding.triggerSourceDescriptionText.text = TriggerUiSupport.sourceDescription(this, source)
         if (source == TriggerSource.TIME_DAILY || source == TriggerSource.TIME_WEEKLY) {
             binding.inputRepeatMode.setText(
                 repeatModeOptions.firstOrNull { it.value == source }?.label.orEmpty(),
@@ -479,9 +494,9 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
 
         val exactAlarmAvailable = hasExactAlarmAccess()
         binding.exactAlarmNoticeText.text = if (exactAlarmAvailable) {
-            "Exact alarms are available. Minute-level time rules should run on time."
+            getString(R.string.trigger_exact_alarm_available)
         } else {
-            "Exact alarms are unavailable, so minute-level time rules can drift until access is granted."
+            getString(R.string.trigger_exact_alarm_unavailable)
         }
         binding.requestExactAlarmAccessButton.isVisible = !exactAlarmAvailable
     }
@@ -535,7 +550,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
 
     private fun showAbsoluteDatePicker() {
         val datePicker = MaterialDatePicker.Builder.datePicker()
-            .setTitleText("Choose date")
+            .setTitleText(getString(R.string.portal_ui_pick_date))
             .setSelection(selectedAbsoluteDateUtcMs ?: MaterialDatePicker.todayInUtcMilliseconds())
             .build()
         datePicker.addOnPositiveButtonClickListener { selection ->
@@ -547,7 +562,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
 
     private fun showAbsoluteTimePicker() {
         val timePicker = MaterialTimePicker.Builder()
-            .setTitleText("Choose time")
+            .setTitleText(getString(R.string.portal_ui_pick_time))
             .setHour(selectedAbsoluteHour ?: Calendar.getInstance().get(Calendar.HOUR_OF_DAY))
             .setMinute(selectedAbsoluteMinute ?: Calendar.getInstance().get(Calendar.MINUTE))
             .setTimeFormat(if (DateFormat.is24HourFormat(this)) TimeFormat.CLOCK_24H else TimeFormat.CLOCK_12H)
@@ -562,7 +577,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
 
     private fun showRecurringTimePicker() {
         val timePicker = MaterialTimePicker.Builder()
-            .setTitleText("Choose time")
+            .setTitleText(getString(R.string.portal_ui_pick_time))
             .setHour(selectedRecurringHour ?: 9)
             .setMinute(selectedRecurringMinute ?: 0)
             .setTimeFormat(if (DateFormat.is24HourFormat(this)) TimeFormat.CLOCK_24H else TimeFormat.CLOCK_12H)
@@ -577,28 +592,28 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
 
     private fun refreshTimeSummaries() {
         binding.delaySummaryText.text = if (selectedDelayMinutes == null) {
-            "Choose how long to wait before this trigger runs."
+            getString(R.string.trigger_choose_delay)
         } else {
             formatDelay(selectedDelayMinutes!!)
         }
         binding.absoluteSummaryText.text = buildAbsoluteTimeMillis()?.let { absoluteMs ->
-            "Runs at ${formatDateTime(absoluteMs)}"
-        } ?: "Choose a date and a time."
+            getString(R.string.trigger_runs_at, formatDateTime(absoluteMs))
+        } ?: getString(R.string.trigger_choose_datetime)
 
         val recurringTimeText = if (selectedRecurringHour == null || selectedRecurringMinute == null) {
-            "Choose a time for this recurring trigger."
+            getString(R.string.trigger_choose_recurring_time)
         } else {
             val summary = formatHourMinute(selectedRecurringHour!!, selectedRecurringMinute!!)
             when (selectedSource) {
-                TriggerSource.TIME_DAILY -> "Runs every day at $summary"
+                TriggerSource.TIME_DAILY -> getString(R.string.trigger_runs_daily, summary)
                 TriggerSource.TIME_WEEKLY -> {
                     val days = selectedWeekdays()
-                        .mapNotNull { TriggerUiSupport.dayOfWeekLabel(it) }
+                        .mapNotNull { TriggerUiSupport.dayOfWeekLabel(this, it) }
                         .joinToString(", ")
                     if (days.isBlank()) {
-                        "Choose at least one weekday for $summary"
+                        getString(R.string.trigger_choose_weekday, summary)
                     } else {
-                        "Runs on $days at $summary"
+                        getString(R.string.trigger_runs_weekly, days, summary)
                     }
                 }
 
@@ -619,11 +634,11 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
         val ruleName = binding.inputRuleName.text?.toString()?.trim().orEmpty()
         val promptTemplate = binding.inputPromptTemplate.text?.toString()?.trim().orEmpty()
         if (ruleName.isBlank()) {
-            binding.inputRuleNameLayout.error = "Required"
+            binding.inputRuleNameLayout.error = getString(R.string.trigger_required)
             return null
         }
         if (promptTemplate.isBlank()) {
-            binding.inputPromptTemplateLayout.error = "Required"
+            binding.inputPromptTemplateLayout.error = getString(R.string.trigger_required)
             return null
         }
 
@@ -638,7 +653,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
             binding.inputCooldownSeconds.text?.isNotBlank() == true &&
             cooldownSeconds == null
         ) {
-            binding.inputCooldownSecondsLayout.error = "Enter a valid number"
+            binding.inputCooldownSecondsLayout.error = getString(R.string.portal_ui_enter_valid_number)
             return null
         }
 
@@ -655,7 +670,7 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
                 RunLimitMode.CUSTOM -> {
                     val customLimit = binding.inputCustomRunLimit.text?.toString()?.trim()?.toIntOrNull()
                     if (customLimit == null || customLimit <= 0) {
-                        binding.customRunLimitLayout.error = "Enter a positive number"
+                        binding.customRunLimitLayout.error = getString(R.string.trigger_positive_number)
                         return null
                     }
                     customLimit
@@ -921,9 +936,9 @@ class TriggerRuleEditorActivity : AppCompatActivity() {
         val hours = totalMinutes / 60
         val minutes = totalMinutes % 60
         return when {
-            hours > 0 && minutes > 0 -> String.format(Locale.getDefault(), "%d h %d min", hours, minutes)
-            hours > 0 -> String.format(Locale.getDefault(), "%d h", hours)
-            else -> String.format(Locale.getDefault(), "%d min", minutes)
+            hours > 0 && minutes > 0 -> getString(R.string.trigger_delay_hours_minutes, hours, minutes)
+            hours > 0 -> getString(R.string.trigger_delay_hours, hours)
+            else -> getString(R.string.trigger_delay_minutes, minutes)
         }
     }
 

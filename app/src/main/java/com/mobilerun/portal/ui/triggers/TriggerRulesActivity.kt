@@ -200,15 +200,17 @@ class TriggerRulesActivity : AppCompatActivity() {
     }
 
     private fun refreshPermissionSummary() {
-        val notificationStatus = if (isNotificationAccessEnabled()) "granted" else "missing"
-        val smsStatus = if (hasPermission(Manifest.permission.RECEIVE_SMS)) "granted" else "missing"
-        val contactsStatus = if (hasPermission(Manifest.permission.READ_CONTACTS)) "granted" else "missing"
+        val granted = getString(R.string.trigger_permission_granted)
+        val missing = getString(R.string.trigger_permission_missing)
+        val notificationStatus = if (isNotificationAccessEnabled()) granted else missing
+        val smsStatus = if (hasPermission(Manifest.permission.RECEIVE_SMS)) granted else missing
+        val contactsStatus = if (hasPermission(Manifest.permission.READ_CONTACTS)) granted else missing
 
         binding.permissionsSummaryText.text =
-            "Notification: $notificationStatus | SMS: $smsStatus | Contacts: $contactsStatus"
-        binding.notificationAccessStatusText.text = notificationStatus.replaceFirstChar { it.uppercase() }
-        binding.smsPermissionStatusText.text = smsStatus.replaceFirstChar { it.uppercase() }
-        binding.contactsPermissionStatusText.text = contactsStatus.replaceFirstChar { it.uppercase() }
+            getString(R.string.trigger_permission_summary, notificationStatus, smsStatus, contactsStatus)
+        binding.notificationAccessStatusText.text = notificationStatus
+        binding.smsPermissionStatusText.text = smsStatus
+        binding.contactsPermissionStatusText.text = contactsStatus
 
         val showExactAlarmCard = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
         binding.exactAlarmCard.visibility = if (showExactAlarmCard) View.VISIBLE else View.GONE
@@ -216,9 +218,9 @@ class TriggerRulesActivity : AppCompatActivity() {
 
         val exactAlarmAvailable = hasExactAlarmAccess()
         binding.exactAlarmSummaryText.text = if (exactAlarmAvailable) {
-            "Exact alarms are available. Minute-level time rules should run on time."
+            getString(R.string.trigger_exact_alarm_available)
         } else {
-            "Exact alarms are unavailable, so time rules can drift by about a minute until access is granted."
+            getString(R.string.trigger_exact_alarm_unavailable)
         }
         binding.buttonExactAlarmAccess.visibility = if (exactAlarmAvailable) View.GONE else View.VISIBLE
     }
@@ -366,21 +368,18 @@ class TriggerRulesActivity : AppCompatActivity() {
                 binding.ruleNameText.text = rule.name
                 binding.ruleSummaryText.text = TriggerUiSupport.summary(rule, itemView.context)
                 binding.ruleStatusText.text = buildString {
-                    append(if (rule.enabled) "Enabled" else "Disabled")
+                    append(itemView.context.getString(if (rule.enabled) R.string.task_details_boolean_enabled else R.string.task_details_boolean_disabled))
                     rule.maxLaunchCount?.let { maxCount ->
                         append(" • ")
-                        append(rule.successfulLaunchCount)
-                        append("/")
-                        append(maxCount)
-                        append(" launches used")
+                        append(itemView.context.getString(R.string.trigger_launches_used, rule.successfulLaunchCount, maxCount))
                     }
                     if (rule.lastMatchedAtMs > 0) {
-                        append(" • matched ")
-                        append(TriggerUiSupport.formatTimestamp(rule.lastMatchedAtMs))
+                        append(" • ")
+                        append(itemView.context.getString(R.string.trigger_matched_at, TriggerUiSupport.formatTimestamp(rule.lastMatchedAtMs)))
                     }
                     if (rule.lastLaunchedAtMs > 0) {
-                        append(" • launched ")
-                        append(TriggerUiSupport.formatTimestamp(rule.lastLaunchedAtMs))
+                        append(" • ")
+                        append(itemView.context.getString(R.string.trigger_launched_at, TriggerUiSupport.formatTimestamp(rule.lastLaunchedAtMs)))
                     }
                 }
                 binding.ruleEnabledSwitch.setOnCheckedChangeListener(null)
@@ -426,14 +425,14 @@ class TriggerRulesActivity : AppCompatActivity() {
             fun bind(entry: TriggerQueueEntry, onCancel: (TriggerQueueEntry) -> Unit) {
                 binding.queueRuleNameText.text = entry.ruleName
                 binding.queueMetaText.text = buildString {
-                    append(entry.source.name.lowercase().replace('_', ' '))
+                    append(TriggerUiSupport.sourceLabel(itemView.context, entry.source))
                     val sender = entry.signal.payload["title"]
                     if (!sender.isNullOrBlank()) {
                         append(" • ")
                         append(sender)
                     }
-                    append(" • queued ")
-                    append(TriggerUiSupport.formatTimestamp(entry.enqueuedAtMs))
+                    append(" • ")
+                    append(itemView.context.getString(R.string.trigger_queued_at, TriggerUiSupport.formatTimestamp(entry.enqueuedAtMs)))
                 }
                 binding.queueCancelButton.setOnClickListener { onCancel(entry) }
             }
@@ -478,7 +477,7 @@ class TriggerRulesActivity : AppCompatActivity() {
                     append(" • ")
                     append(record.ruleName)
                     append(" • ")
-                    append(TriggerUiSupport.dispositionLabel(record.disposition))
+                    append(TriggerUiSupport.dispositionLabel(itemView.context, record.disposition))
                 }
             }
         }

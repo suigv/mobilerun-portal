@@ -110,7 +110,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             val success = intent.getBooleanExtra(ApiHandler.EXTRA_INSTALL_SUCCESS, false)
             val message =
                 intent.getStringExtra(ApiHandler.EXTRA_INSTALL_MESSAGE)
-                    ?: "App installed successfully"
+                    ?: getString(R.string.portal_ui_app_installed)
             val isPortalUpdate =
                 intent.getBooleanExtra(UpdateInstallReceiver.EXTRA_IS_PORTAL_UPDATE, false)
             runOnUiThread {
@@ -392,7 +392,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
         if (configManager.productionMode) {
             binding.layoutStandardUi.visibility = View.GONE
             binding.layoutProductionMode.visibility = View.VISIBLE
-            binding.textProductionDeviceId.text = "Device ID: ${configManager.deviceID}"
+            binding.textProductionDeviceId.text = getString(R.string.portal_ui_device_id_format, configManager.deviceID)
         } else {
             binding.layoutStandardUi.visibility = View.VISIBLE
             binding.layoutProductionMode.visibility = View.GONE
@@ -1611,7 +1611,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                     binding.layoutConnected.visibility = View.VISIBLE
                     binding.btnSignOut.visibility = if (showSignOut) View.VISIBLE else View.GONE
                     binding.textDeviceId.text =
-                        "Device ID: ${ConfigManager.getInstance(this).deviceID}"
+                        getString(R.string.portal_ui_device_id_format, ConfigManager.getInstance(this).deviceID)
                 }
 
                 ConnectionState.CONNECTING, ConnectionState.RECONNECTING -> {
@@ -1619,11 +1619,11 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                     binding.btnConnectingSignOut.visibility =
                         if (showSignOut) View.VISIBLE else View.GONE
                     if (state == ConnectionState.RECONNECTING) {
-                        binding.textConnectingStatus.text = "Reconnecting..."
+                        binding.textConnectingStatus.text = getString(R.string.portal_ui_reconnecting)
                         binding.textConnectingSubtitle.text =
                             getString(R.string.reconnecting_subtitle)
                     } else {
-                        binding.textConnectingStatus.text = "Connecting..."
+                        binding.textConnectingStatus.text = getString(R.string.portal_ui_connecting)
                         binding.textConnectingSubtitle.text =
                             getString(R.string.connecting_subtitle)
                     }
@@ -1712,7 +1712,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             Toast.makeText(this, getString(R.string.portal_ui_token_copied), Toast.LENGTH_SHORT).show()
         }
 
-        binding.deviceIpText.text = getIpAddress() ?: "Unavailable (Check WiFi)"
+        binding.deviceIpText.text = getIpAddress() ?: getString(R.string.portal_ui_ip_unavailable)
     }
 
     private fun getIpAddress(): String? {
@@ -2212,11 +2212,11 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
                 binding.socketServerStatus.text = status
                 binding.socketServerStatus.setTextColor(ContextCompat.getColor(this, R.color.mobilerun_success))
             } else {
-                binding.socketServerStatus.text = "Service not available"
+                binding.socketServerStatus.text = getString(R.string.portal_ui_service_not_available)
             }
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error updating socket server status: ${e.message}")
-            binding.socketServerStatus.text = "Error"
+            binding.socketServerStatus.text = getString(R.string.portal_ui_error)
         }
     }
 
@@ -2233,7 +2233,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             }
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error updating ADB forward command: ${e.message}")
-            binding.adbForwardCommand.text = "Error"
+            binding.adbForwardCommand.text = getString(R.string.portal_ui_error)
         }
     }
 
@@ -2255,10 +2255,10 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
         try {
             val packageInfo = packageManager.getPackageInfo(packageName, 0)
             val version = packageInfo.versionName
-            binding.versionText.text = "Version: $version"
+            binding.versionText.text = getString(R.string.update_current_version, version ?: getString(R.string.dashboard_not_available))
         } catch (e: Exception) {
             Log.e("MOBILERUN_MAIN", "Error getting app version: ${e.message}")
-            binding.versionText.text = "Version: N/A"
+            binding.versionText.text = getString(R.string.update_current_version, getString(R.string.dashboard_not_available))
         }
     }
 
@@ -2267,7 +2267,7 @@ class MainActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener {
             // Create a scrollable TextView for the logs
             val scrollView = androidx.core.widget.NestedScrollView(this)
             val textView = TextView(this).apply {
-                text = responseText.ifEmpty { "No logs available. Fetch data first." }
+                text = responseText.ifEmpty { getString(R.string.portal_ui_no_logs) }
                 textSize = 12f
                 setTextColor(ContextCompat.getColor(context, R.color.mobilerun_foreground))
                 setPadding(40, 40, 40, 40)

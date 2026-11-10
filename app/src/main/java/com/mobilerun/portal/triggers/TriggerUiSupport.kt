@@ -1,6 +1,7 @@
 package com.mobilerun.portal.triggers
 
 import android.content.Context
+import com.mobilerun.portal.R
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,21 +44,99 @@ object TriggerUiSupport {
         }
     }
 
+    fun sourceLabel(context: Context, source: TriggerSource): String = context.getString(
+        when (source) {
+            TriggerSource.TIME_DELAY -> R.string.trigger_source_time_delay
+            TriggerSource.TIME_ABSOLUTE -> R.string.trigger_source_time_absolute
+            TriggerSource.TIME_DAILY -> R.string.trigger_source_time_daily
+            TriggerSource.TIME_WEEKLY -> R.string.trigger_source_time_weekly
+            TriggerSource.NOTIFICATION_POSTED -> R.string.trigger_source_notification_posted
+            TriggerSource.NOTIFICATION_REMOVED -> R.string.trigger_source_notification_removed
+            TriggerSource.APP_ENTERED -> R.string.trigger_source_app_entered
+            TriggerSource.APP_EXITED -> R.string.trigger_source_app_exited
+            TriggerSource.BATTERY_LOW -> R.string.trigger_source_battery_low
+            TriggerSource.BATTERY_OKAY -> R.string.trigger_source_battery_okay
+            TriggerSource.BATTERY_LEVEL_CHANGED -> R.string.trigger_source_battery_level_changed
+            TriggerSource.POWER_CONNECTED -> R.string.trigger_source_power_connected
+            TriggerSource.POWER_DISCONNECTED -> R.string.trigger_source_power_disconnected
+            TriggerSource.USER_PRESENT -> R.string.trigger_source_user_present
+            TriggerSource.NETWORK_CONNECTED -> R.string.trigger_source_network_connected
+            TriggerSource.NETWORK_TYPE_CHANGED -> R.string.trigger_source_network_type_changed
+            TriggerSource.SMS_RECEIVED -> R.string.trigger_source_sms_received
+        },
+    )
+
+    fun sourceDescription(context: Context, source: TriggerSource): String = context.getString(
+        when (source) {
+            TriggerSource.TIME_DELAY -> R.string.trigger_description_time_delay
+            TriggerSource.TIME_ABSOLUTE -> R.string.trigger_description_time_absolute
+            TriggerSource.TIME_DAILY -> R.string.trigger_description_time_daily
+            TriggerSource.TIME_WEEKLY -> R.string.trigger_description_time_weekly
+            TriggerSource.NOTIFICATION_POSTED -> R.string.trigger_description_notification_posted
+            TriggerSource.NOTIFICATION_REMOVED -> R.string.trigger_description_notification_removed
+            TriggerSource.APP_ENTERED -> R.string.trigger_description_app_entered
+            TriggerSource.APP_EXITED -> R.string.trigger_description_app_exited
+            TriggerSource.BATTERY_LOW -> R.string.trigger_description_battery_low
+            TriggerSource.BATTERY_OKAY -> R.string.trigger_description_battery_okay
+            TriggerSource.BATTERY_LEVEL_CHANGED -> R.string.trigger_description_battery_level_changed
+            TriggerSource.POWER_CONNECTED -> R.string.trigger_description_power_connected
+            TriggerSource.POWER_DISCONNECTED -> R.string.trigger_description_power_disconnected
+            TriggerSource.USER_PRESENT -> R.string.trigger_description_user_present
+            TriggerSource.NETWORK_CONNECTED -> R.string.trigger_description_network_connected
+            TriggerSource.NETWORK_TYPE_CHANGED -> R.string.trigger_description_network_type_changed
+            TriggerSource.SMS_RECEIVED -> R.string.trigger_description_sms_received
+        },
+    )
+
     fun summary(rule: TriggerRule, context: Context? = null): String {
         return buildList {
-            add(sourceLabel(rule.source))
+            add(if (context == null) sourceLabel(rule.source) else sourceLabel(context, rule.source))
             rule.packageName?.takeIf { it.isNotBlank() }?.let { pkg ->
                 val label = resolveAppLabel(context, pkg)
-                add(if (label != null) "app=$label" else "pkg=$pkg")
+                add(
+                    if (context == null) {
+                        if (label != null) "app=$label" else "pkg=$pkg"
+                    } else {
+                        context.getString(if (label != null) R.string.trigger_summary_app else R.string.trigger_summary_package, label ?: pkg)
+                    },
+                )
             }
-            rule.titleFilter?.takeIf { it.isNotBlank() }?.let { add("title=$it") }
-            rule.textFilter?.takeIf { it.isNotBlank() }?.let { add("text=$it") }
-            rule.networkType?.let { add("network=${it.name}") }
-            rule.thresholdValue?.let { add("threshold=${rule.thresholdComparison.name.lowercase()} $it") }
-            rule.phoneNumberFilter?.takeIf { it.isNotBlank() }?.let { add("phone=$it") }
-            rule.delayMinutes?.let { add("delay=${it}m") }
+            rule.titleFilter?.takeIf { it.isNotBlank() }?.let {
+                add(context?.getString(R.string.trigger_summary_title, it) ?: "title=$it")
+            }
+            rule.textFilter?.takeIf { it.isNotBlank() }?.let {
+                add(context?.getString(R.string.trigger_summary_text, it) ?: "text=$it")
+            }
+            rule.networkType?.let {
+                val label = if (context == null) it.name else context.getString(when (it) {
+                    TriggerNetworkType.NONE -> R.string.trigger_network_none
+                    TriggerNetworkType.WIFI -> R.string.trigger_network_wifi
+                    TriggerNetworkType.CELLULAR -> R.string.trigger_network_cellular
+                    TriggerNetworkType.ETHERNET -> R.string.trigger_network_ethernet
+                    TriggerNetworkType.OTHER -> R.string.trigger_network_other
+                })
+                add(context?.getString(R.string.trigger_summary_network, label) ?: "network=$label")
+            }
+            rule.thresholdValue?.let {
+                val comparison = if (context == null) rule.thresholdComparison.name.lowercase() else context.getString(
+                    when (rule.thresholdComparison) {
+                        TriggerThresholdComparison.AT_OR_BELOW -> R.string.trigger_option_at_or_below
+                        TriggerThresholdComparison.AT_OR_ABOVE -> R.string.trigger_option_at_or_above
+                    },
+                )
+                add(context?.getString(R.string.trigger_summary_threshold, comparison, it) ?: "threshold=$comparison $it")
+            }
+            rule.phoneNumberFilter?.takeIf { it.isNotBlank() }?.let {
+                add(context?.getString(R.string.trigger_summary_phone, it) ?: "phone=$it")
+            }
+            rule.delayMinutes?.let {
+                add(context?.getString(R.string.trigger_summary_delay, it) ?: "delay=${it}m")
+            }
             if (rule.source == TriggerSource.TIME_ABSOLUTE) {
-                rule.absoluteTimeMillis?.let { add("at=${formatTimestamp(it)}") }
+                rule.absoluteTimeMillis?.let {
+                    val time = formatTimestamp(it)
+                    add(context?.getString(R.string.trigger_summary_at, time) ?: "at=$time")
+                }
             }
             if (rule.source == TriggerSource.TIME_DAILY || rule.source == TriggerSource.TIME_WEEKLY) {
                 val hour = rule.dailyHour ?: 0
@@ -65,7 +144,7 @@ object TriggerUiSupport {
                 add(String.format(Locale.US, "%02d:%02d", hour, minute))
                 if (rule.source == TriggerSource.TIME_WEEKLY) {
                     val labels = rule.resolvedWeeklyDaysOfWeek()
-                        .mapNotNull { dayOfWeekLabel(it) }
+                        .mapNotNull { if (context == null) dayOfWeekLabel(it) else dayOfWeekLabel(context, it) }
                     if (labels.isNotEmpty()) {
                         add(labels.joinToString(", "))
                     }
@@ -80,6 +159,20 @@ object TriggerUiSupport {
             .split('_')
             .joinToString(" ") { it.replaceFirstChar { char -> char.titlecase(Locale.US) } }
     }
+
+    fun dispositionLabel(context: Context, disposition: TriggerRunDisposition): String = context.getString(
+        when (disposition) {
+            TriggerRunDisposition.MATCHED -> R.string.trigger_disposition_matched
+            TriggerRunDisposition.LAUNCHED -> R.string.trigger_disposition_launched
+            TriggerRunDisposition.SKIPPED_BUSY -> R.string.trigger_disposition_skipped_busy
+            TriggerRunDisposition.BUFFERED -> R.string.trigger_disposition_buffered
+            TriggerRunDisposition.DEBOUNCED -> R.string.trigger_disposition_debounced
+            TriggerRunDisposition.PERMISSION_MISSING -> R.string.trigger_disposition_permission_missing
+            TriggerRunDisposition.LAUNCH_FAILED -> R.string.trigger_disposition_launch_failed
+            TriggerRunDisposition.RULE_DISABLED -> R.string.trigger_disposition_rule_disabled
+            TriggerRunDisposition.TEST_LAUNCHED -> R.string.trigger_disposition_test_launched
+        },
+    )
 
     fun formatTimestamp(timestampMs: Long): String {
         return timestampFormatter.format(Date(timestampMs))
@@ -99,6 +192,20 @@ object TriggerUiSupport {
 
     fun dayOfWeekLabel(dayOfWeek: Int): String? {
         return dayOfWeekEntries().firstOrNull { it.second == dayOfWeek }?.first
+    }
+
+    fun dayOfWeekLabel(context: Context, dayOfWeek: Int): String? {
+        val res = when (dayOfWeek) {
+            java.util.Calendar.SUNDAY -> R.string.portal_ui_sun
+            java.util.Calendar.MONDAY -> R.string.portal_ui_mon
+            java.util.Calendar.TUESDAY -> R.string.portal_ui_tue
+            java.util.Calendar.WEDNESDAY -> R.string.portal_ui_wed
+            java.util.Calendar.THURSDAY -> R.string.portal_ui_thu
+            java.util.Calendar.FRIDAY -> R.string.portal_ui_fri
+            java.util.Calendar.SATURDAY -> R.string.portal_ui_sat
+            else -> return null
+        }
+        return context.getString(res)
     }
 
     fun resolveAppLabel(context: Context?, packageName: String?): String? {

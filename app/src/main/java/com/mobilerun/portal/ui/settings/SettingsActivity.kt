@@ -255,7 +255,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                     configManager.setSocketServerPortWithNotification(port)
                     binding.inputSocketServerPort.clearFocus()
                 } else {
-                    binding.inputSocketServerPort.error = "Invalid Port"
+                    binding.inputSocketServerPort.error = getString(R.string.portal_ui_invalid_port)
                 }
                 true
             } else {
@@ -279,7 +279,7 @@ class SettingsActivity : AppCompatActivity(), ConfigManager.ConfigChangeListener
                     configManager.setWebSocketPortWithNotification(port)
                     binding.inputWsPort.clearFocus()
                 } else {
-                    binding.inputWsPort.error = "Invalid Port"
+                    binding.inputWsPort.error = getString(R.string.portal_ui_invalid_port)
                 }
                 true
             } else {
